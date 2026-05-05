@@ -20,9 +20,9 @@ test("deterministic agents coordinate payment intent, escrow, verification, and 
   assert.equal(result.proposal.agentId, "specialist-worker");
   assert.equal(result.verification.approved, true);
   assert.equal(Array.isArray(result.accural.reconciliation), true);
-  assert.equal((result.accural.reconciliation as unknown[]).length, 2);
+  assert.equal(result.accural.reconciliation.length, 2);
   assert.equal(
-    (result.accural.finalBalance as { releasedSpend: string }).releasedSpend,
+    result.accural.finalBalance.releasedSpend,
     result.proposal.amount,
   );
 });
@@ -62,6 +62,6 @@ test("llm agents can drive the same Accural rails through a provided LLM client"
   assert.equal(result.mode, "llm");
   assert.equal(result.plan.taskId, "llm-hero");
   assert.equal(result.verification.approved, true);
-  assert.equal((result.accural.paymentIntent as { amount: string }).amount, "10");
-  assert.equal((result.accural.release as { status: string }).status, "RELEASED");
+  assert.equal(result.accural.paymentIntent.amount, "10");
+  assert.equal(result.accural.release.status, "RELEASED");
 });

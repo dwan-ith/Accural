@@ -1,4 +1,17 @@
 import { Keypair, PublicKey } from "@solana/web3.js";
+import bs58 from "bs58";
+import type {
+  AgentWalletResult,
+  BalanceResult,
+  DirectPaymentResult,
+  EscrowResult,
+  PaymentIntentResult,
+  PolicyResult,
+  ReconciliationEntry,
+  ReleaseResult,
+  ReputationResult,
+  ServiceListingResult,
+} from "./agents/types.js";
 import {
   createEscrow,
   createPaymentIntent,
@@ -16,7 +29,11 @@ import {
   updatePaymentIntentStatus,
   upsertAgent,
   upsertPolicy,
+  upsertReputation,
+  getReputation,
   withTransaction,
+  upsertService,
+  listServices as dbListServices,
   type EscrowRecord,
   type PolicyRecord,
 } from "./db.js";
@@ -66,8 +83,35 @@ export type ReleaseEscrowInput = {
   proofUri: string;
 };
 
+export type RegisterServiceInput = {
+  agentId: string;
+  serviceType: string;
+  description: string;
+  price: string;
+};
+
+export type DirectPaymentInput = {
+  payerAgentId: string;
+  taskId: string;
+  amount: string;
+  recipientPubkey: string;
+  purpose: string;
+  proofUri: string;
+};
+
 export class AccuralRuntime {
-  private readonly sessionOwner = Keypair.generate();
+  private readonly sessionOwner: Keypair;
+
+  constructor(owner?: Keypair) {
+    if (owner) {
+      this.sessionOwner = owner;
+    } else if (process.env.ACCURAL_SESSION_OWNER) {
+      this.sessionOwner = Keypair.fromSecretKey(bs58.decode(process.env.ACCURAL_SESSION_OWNER));
+    } else {
+      this.sessionOwner = Keypair.generate();
+      console.warn("No ACCURAL_SESSION_OWNER provided. Generated ephemeral session owner:", this.sessionOwner.publicKey.toBase58());
+    }
+  }
 
   async initialize() {
     await initDb();
@@ -81,7 +125,7 @@ export class AccuralRuntime {
     return this.sessionOwner.publicKey.toBase58();
   }
 
-  async createAgentWallet(input: { agentId: string; ownerPubkey?: string }) {
+  async createAgentWallet(input: { agentId: string; ownerPubkey?: string }): Promise<AgentWalletResult> {
     assertId(input.agentId, "agentId");
     const ownerPubkey = input.ownerPubkey ?? this.getSessionOwnerPubkey();
     assertPubkey(ownerPubkey, "ownerPubkey");
@@ -110,7 +154,45 @@ export class AccuralRuntime {
     };
   }
 
-  async getBalance(input: { agentId: string }) {
+  async registerService(input: RegisterServiceInput): Promise<ServiceListingResult> {
+    assertId(input.agentId, "agentId");
+    assertId(input.serviceType, "serviceType");
+    await requireAgent(input.agentId);
+
+    const priceMinor = parseUsdcAmount(input.price);
+
+    const service = await upsertService({
+      service_type: input.serviceType,
+      agent_id: input.agentId,
+      description: input.description,
+      price_minor: priceMinor.toString(),
+      asset: "USDC",
+      active: 1,
+    });
+
+    return {
+      serviceType: service!.service_type,
+      agentId: service!.agent_id,
+      description: service!.description,
+      price: formatUsdcAmount(BigInt(service!.price_minor)),
+      asset: service!.asset,
+      active: service!.active === 1,
+    };
+  }
+
+  async listServices(input?: { serviceType?: string }): Promise<ServiceListingResult[]> {
+    const services = await dbListServices(input?.serviceType);
+    return services.map(service => ({
+      serviceType: service.service_type,
+      agentId: service.agent_id,
+      description: service.description,
+      price: formatUsdcAmount(BigInt(service.price_minor)),
+      asset: service.asset,
+      active: service.active === 1,
+    }));
+  }
+
+  async getBalance(input: { agentId: string }): Promise<BalanceResult> {
     assertId(input.agentId, "agentId");
     const agent = await requireAgent(input.agentId);
     const policy = await requirePolicy(input.agentId);
@@ -135,7 +217,18 @@ export class AccuralRuntime {
     };
   }
 
-  async setSpendPolicy(input: SetPolicyInput) {
+  async getReputation(agentId: string): Promise<ReputationResult> {
+    assertId(agentId, "agentId");
+    const reputation = await getReputation(agentId);
+    return {
+      agentId,
+      totalTasksCompleted: reputation?.total_tasks_completed ?? 0,
+      totalVolume: reputation ? formatUsdcAmount(reputation.total_volume_minor) : "0.00",
+      asset: DEFAULT_ASSET,
+    };
+  }
+
+  async setSpendPolicy(input: SetPolicyInput): Promise<PolicyResult | undefined> {
     assertId(input.agentId, "agentId");
     await requireAgent(input.agentId);
 
@@ -171,7 +264,7 @@ export class AccuralRuntime {
     return presentPolicy(policy);
   }
 
-  async requestPayment(input: RequestPaymentInput) {
+  async requestPayment(input: RequestPaymentInput): Promise<PaymentIntentResult> {
     assertId(input.requesterAgentId, "requesterAgentId");
     assertId(input.taskId, "taskId");
     assertPubkey(input.recipientPubkey, "recipientPubkey");
@@ -211,7 +304,7 @@ export class AccuralRuntime {
     };
   }
 
-  async createTaskEscrow(input: CreateEscrowInput) {
+  async createTaskEscrow(input: CreateEscrowInput): Promise<EscrowResult> {
     assertId(input.payerAgentId, "payerAgentId");
     assertId(input.taskId, "taskId");
     assertPubkey(input.beneficiaryPubkey, "beneficiaryPubkey");
@@ -285,7 +378,7 @@ export class AccuralRuntime {
     });
   }
 
-  async releaseEscrow(input: ReleaseEscrowInput) {
+  async releaseEscrow(input: ReleaseEscrowInput): Promise<ReleaseResult> {
     assertId(input.taskId, "taskId");
     assertPubkey(input.verifierPubkey, "verifierPubkey");
     if (!input.proofUri.trim()) {
@@ -311,6 +404,7 @@ export class AccuralRuntime {
       requireAllowedAction(policy, "release_escrow");
       const releasedEscrow = await markEscrowReleased(escrow.escrow_id);
       await updatePaymentIntentStatus(escrow.payment_intent_id, "PAID");
+      await upsertReputation(escrow.payer_agent_id, 1, BigInt(escrow.amount_minor));
 
       const reconciliation = await this.writeReconciliation({
         escrow: releasedEscrow!,
@@ -333,7 +427,59 @@ export class AccuralRuntime {
     });
   }
 
-  async reconcilePayment(taskId?: string) {
+  async directPayment(input: DirectPaymentInput): Promise<DirectPaymentResult> {
+    assertId(input.payerAgentId, "payerAgentId");
+    assertId(input.taskId, "taskId");
+    assertPubkey(input.recipientPubkey, "recipientPubkey");
+    if (!input.proofUri.trim()) {
+      throw new Error("proofUri is required to preserve semantic reconciliation memory.");
+    }
+
+    const amountMinor = parseUsdcAmount(input.amount);
+
+    return withTransaction(async () => {
+      await requireAgent(input.payerAgentId);
+      const policy = await requirePolicy(input.payerAgentId);
+      requireAllowedAction(policy, "direct_payment");
+      requireRecipientAllowed(policy, input.recipientPubkey);
+      enforcePolicy(policy, amountMinor, true); // Assuming direct payments are explicitly requested
+
+      const remaining = BigInt(policy.session_budget_remaining_minor) - amountMinor;
+      const updatedPolicy = await upsertPolicy({
+        agent_id: policy.agent_id,
+        max_per_transaction_minor: policy.max_per_transaction_minor,
+        session_budget_total_minor: policy.session_budget_total_minor,
+        session_budget_remaining_minor: remaining.toString(),
+        approval_required_above_minor: policy.approval_required_above_minor,
+        allowed_actions_json: policy.allowed_actions_json,
+        blocked_recipients_json: policy.blocked_recipients_json,
+      });
+      await upsertReputation(input.payerAgentId, 1, amountMinor);
+
+      const reconciliation = await this.writeDirectPaymentReconciliation({
+        taskId: input.taskId,
+        payerAgentId: input.payerAgentId,
+        amountMinor,
+        policy: updatedPolicy!,
+        eventType: "DIRECT_PAYMENT",
+        purpose: input.purpose,
+        outcome: "Direct payment made to recipient.",
+        proofUri: input.proofUri,
+      });
+
+      return {
+        taskId: input.taskId,
+        payerAgentId: input.payerAgentId,
+        recipientPubkey: input.recipientPubkey,
+        amount: formatUsdcAmount(amountMinor),
+        asset: DEFAULT_ASSET,
+        purpose: input.purpose,
+        reconciliation,
+      };
+    });
+  }
+
+  async reconcilePayment(taskId?: string): Promise<ReconciliationEntry[]> {
     if (taskId) {
       assertId(taskId, "taskId");
     }
@@ -417,6 +563,55 @@ export class AccuralRuntime {
       event_type: input.eventType,
       amount_minor: input.escrow.amount_minor,
       asset: input.escrow.asset,
+      purpose: input.purpose,
+      outcome: input.outcome,
+      proof_uri: input.proofUri,
+      policy_snapshot_json: JSON.stringify(policySnapshot),
+      semantic_hash: semanticHash(semanticPayload),
+    });
+
+    return {
+      recordId: record?.record_id,
+      transactionSignature: record?.transaction_signature,
+      semanticHash: record?.semantic_hash,
+    };
+  }
+
+  private async writeDirectPaymentReconciliation(input: {
+    taskId: string;
+    payerAgentId: string;
+    amountMinor: string;
+    policy: PolicyRecord;
+    eventType: string;
+    purpose: string;
+    outcome: string;
+    proofUri: string | null;
+  }) {
+    const recordId = makeId("rec");
+    const transactionSignature = `local_${input.eventType.toLowerCase()}_${recordId}`;
+    const policySnapshot = presentPolicy(input.policy);
+    const semanticPayload = {
+      recordId,
+      transactionSignature,
+      taskId: input.taskId,
+      agentId: input.payerAgentId,
+      eventType: input.eventType,
+      amountMinor: input.amountMinor,
+      asset: DEFAULT_ASSET,
+      purpose: input.purpose,
+      outcome: input.outcome,
+      proofUri: input.proofUri,
+      policySnapshot,
+    };
+
+    const record = await insertReconciliationRecord({
+      record_id: recordId,
+      transaction_signature: transactionSignature,
+      task_id: input.taskId,
+      agent_id: input.payerAgentId,
+      event_type: input.eventType,
+      amount_minor: input.amountMinor,
+      asset: DEFAULT_ASSET,
       purpose: input.purpose,
       outcome: input.outcome,
       proof_uri: input.proofUri,

@@ -11,7 +11,7 @@ async function runDemo() {
 
   console.log(JSON.stringify(result, null, 2));
 
-  const reconciliation = result.accural.reconciliation as Array<{ eventType: string }>;
+  const reconciliation = result.accural.reconciliation;
   assert.equal(result.verification.approved, true);
   assert.equal(reconciliation.length, 2);
   assert.equal(reconciliation[0].eventType, "ESCROW_FUNDED");

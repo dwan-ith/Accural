@@ -7,9 +7,12 @@ const MAX_AGENT_ID_LEN: usize = 32;
 const MAX_TASK_ID_LEN: usize = 32;
 const MAX_PURPOSE_LEN: usize = 160;
 const MAX_PROOF_URI_LEN: usize = 200;
+const MAX_SERVICE_TYPE_LEN: usize = 32;
+const MAX_DESCRIPTION_LEN: usize = 160;
 const ACTION_REQUEST_PAYMENT: u16 = 1 << 0;
 const ACTION_CREATE_ESCROW: u16 = 1 << 1;
 const ACTION_RELEASE_ESCROW: u16 = 1 << 2;
+const ACTION_DIRECT_PAYMENT: u16 = 1 << 3;
 
 #[program]
 pub mod accural {
@@ -32,6 +35,12 @@ pub mod accural {
         policy.allowed_actions = ACTION_REQUEST_PAYMENT | ACTION_CREATE_ESCROW | ACTION_RELEASE_ESCROW;
         policy.version = 1;
         policy.bump = ctx.bumps.policy_vault;
+
+        let reputation = &mut ctx.accounts.agent_reputation;
+        reputation.agent_registry = registry.key();
+        reputation.total_tasks_completed = 0;
+        reputation.total_volume_minor = 0;
+        reputation.bump = ctx.bumps.agent_reputation;
 
         emit!(AgentInitialized {
             owner: ctx.accounts.owner.key(),
@@ -70,6 +79,46 @@ pub mod accural {
             max_per_transaction,
             session_budget,
             version: policy.version,
+        });
+
+        Ok(())
+    }
+
+    pub fn register_service(
+        ctx: Context<RegisterService>,
+        service_type: String,
+        description: String,
+        price_minor: u64,
+    ) -> Result<()> {
+        validate_id(&service_type, MAX_SERVICE_TYPE_LEN, AccuralError::InvalidServiceType)?;
+        validate_text(&description, MAX_DESCRIPTION_LEN, AccuralError::DescriptionTooLong)?;
+
+        let listing = &mut ctx.accounts.service_listing;
+        listing.agent_registry = ctx.accounts.agent_registry.key();
+        listing.service_type = service_type.clone();
+        listing.description = description;
+        listing.price_minor = price_minor;
+        listing.mint = ctx.accounts.mint.key();
+        listing.active = true;
+        listing.bump = ctx.bumps.service_listing;
+
+        emit!(ServiceRegistered {
+            agent_registry: listing.agent_registry,
+            service_listing: listing.key(),
+            service_type,
+        });
+
+        Ok(())
+    }
+
+    pub fn deactivate_service(ctx: Context<DeactivateService>) -> Result<()> {
+        let listing = &mut ctx.accounts.service_listing;
+        listing.active = false;
+
+        emit!(ServiceDeactivated {
+            agent_registry: listing.agent_registry,
+            service_listing: listing.key(),
+            service_type: listing.service_type.clone(),
         });
 
         Ok(())
@@ -272,6 +321,144 @@ pub mod accural {
             reconciliation_hash,
         });
 
+        let reputation = &mut ctx.accounts.agent_reputation;
+        reputation.total_tasks_completed = reputation
+            .total_tasks_completed
+            .checked_add(1)
+            .ok_or(AccuralError::MathOverflow)?;
+        reputation.total_volume_minor = reputation
+            .total_volume_minor
+            .checked_add(escrow.amount)
+            .ok_or(AccuralError::MathOverflow)?;
+
+        Ok(())
+    }
+
+    pub fn cancel_payment_intent(ctx: Context<CancelPaymentIntent>) -> Result<()> {
+        let intent = &mut ctx.accounts.payment_intent;
+        require!(
+            intent.status == PaymentIntentStatus::Requested,
+            AccuralError::PaymentIntentNotRequested
+        );
+        intent.status = PaymentIntentStatus::Cancelled;
+        
+        emit!(PaymentCancelled {
+            agent_registry: intent.agent_registry,
+            payment_intent: intent.key(),
+            task_id: intent.task_id.clone(),
+        });
+
+        Ok(())
+    }
+
+    pub fn refund_escrow(ctx: Context<RefundEscrow>) -> Result<()> {
+        let escrow = &mut ctx.accounts.escrow_account;
+        require!(
+            escrow.status == EscrowStatus::Funded,
+            AccuralError::EscrowNotFunded
+        );
+        escrow.status = EscrowStatus::Refunded;
+        
+        ctx.accounts.payment_intent.status = PaymentIntentStatus::Cancelled;
+
+        let agent_registry_key = escrow.agent_registry;
+        let task_id_bytes = escrow.task_id.as_bytes();
+        let signer_seeds: &[&[u8]] = &[
+            b"escrow",
+            agent_registry_key.as_ref(),
+            task_id_bytes,
+            &[escrow.bump],
+        ];
+
+        let cpi_accounts = Transfer {
+            from: ctx.accounts.escrow_token_account.to_account_info(),
+            to: ctx.accounts.payer_token_account.to_account_info(),
+            authority: escrow.to_account_info(),
+        };
+        token::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(),
+                cpi_accounts,
+                &[signer_seeds],
+            ),
+            escrow.amount,
+        )?;
+
+        emit!(EscrowRefunded {
+            agent_registry: escrow.agent_registry,
+            escrow: escrow.key(),
+            task_id: escrow.task_id.clone(),
+            amount: escrow.amount,
+        });
+
+        Ok(())
+    }
+
+    pub fn direct_payment(
+        ctx: Context<DirectPayment>,
+        task_id: String,
+        amount: u64,
+        purpose: String,
+        reconciliation_hash: [u8; 32],
+        proof_uri: String,
+    ) -> Result<()> {
+        validate_id(&task_id, MAX_TASK_ID_LEN, AccuralError::InvalidTaskId)?;
+        validate_text(&purpose, MAX_PURPOSE_LEN, AccuralError::PurposeTooLong)?;
+        validate_text(&proof_uri, MAX_PROOF_URI_LEN, AccuralError::ProofUriTooLong)?;
+        require!(amount > 0, AccuralError::ZeroAmount);
+
+        let policy = &mut ctx.accounts.policy_vault;
+        require_action(policy.allowed_actions, ACTION_DIRECT_PAYMENT)?;
+        require!(
+            amount <= policy.max_per_transaction,
+            AccuralError::ExceedsTransactionLimit
+        );
+        require!(
+            amount <= policy.session_budget_remaining,
+            AccuralError::ExceedsSessionBudget
+        );
+        require!(
+            amount <= policy.approval_required_above,
+            AccuralError::ApprovalRequired
+        );
+
+        policy.session_budget_remaining = policy
+            .session_budget_remaining
+            .checked_sub(amount)
+            .ok_or(AccuralError::MathOverflow)?;
+
+        let cpi_accounts = Transfer {
+            from: ctx.accounts.payer_token_account.to_account_info(),
+            to: ctx.accounts.recipient_token_account.to_account_info(),
+            authority: ctx.accounts.owner.to_account_info(),
+        };
+        token::transfer(
+            CpiContext::new(ctx.accounts.token_program.to_account_info(), cpi_accounts),
+            amount,
+        )?;
+
+        let receipt = &mut ctx.accounts.reconciliation_record;
+        receipt.escrow = Pubkey::default();
+        receipt.agent_registry = ctx.accounts.agent_registry.key();
+        receipt.task_id = task_id.clone();
+        receipt.amount = amount;
+        receipt.mint = ctx.accounts.mint.key();
+        receipt.beneficiary = ctx.accounts.recipient.key();
+        receipt.verifier = Pubkey::default();
+        receipt.policy_version = policy.version;
+        receipt.reconciliation_hash = reconciliation_hash;
+        receipt.outcome_code = 0;
+        receipt.proof_uri = proof_uri;
+        receipt.bump = ctx.bumps.reconciliation_record;
+
+        emit!(DirectPaymentMade {
+            agent_registry: receipt.agent_registry,
+            task_id,
+            amount,
+            recipient: receipt.beneficiary,
+            reconciliation_hash,
+        });
+
         Ok(())
     }
 }
@@ -300,6 +487,15 @@ pub struct InitializeAgent<'info> {
     )]
     pub policy_vault: Account<'info, PolicyVault>,
 
+    #[account(
+        init,
+        payer = owner,
+        space = AgentReputation::LEN,
+        seeds = [b"reputation", agent_registry.key().as_ref()],
+        bump
+    )]
+    pub agent_reputation: Account<'info, AgentReputation>,
+
     pub system_program: Program<'info, System>,
 }
 
@@ -318,6 +514,45 @@ pub struct SetPolicy<'info> {
         constraint = policy_vault.agent_registry == agent_registry.key() @ AccuralError::InvalidPolicyVault
     )]
     pub policy_vault: Account<'info, PolicyVault>,
+}
+
+#[derive(Accounts)]
+#[instruction(service_type: String)]
+pub struct RegisterService<'info> {
+    #[account(mut)]
+    pub owner: Signer<'info>,
+
+    #[account(has_one = owner)]
+    pub agent_registry: Box<Account<'info, AgentRegistry>>,
+
+    #[account(
+        init,
+        payer = owner,
+        space = ServiceListing::LEN,
+        seeds = [b"service", agent_registry.key().as_ref(), service_type.as_bytes()],
+        bump
+    )]
+    pub service_listing: Box<Account<'info, ServiceListing>>,
+
+    pub mint: Box<Account<'info, Mint>>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct DeactivateService<'info> {
+    #[account(mut)]
+    pub owner: Signer<'info>,
+
+    #[account(has_one = owner)]
+    pub agent_registry: Box<Account<'info, AgentRegistry>>,
+
+    #[account(
+        mut,
+        seeds = [b"service", agent_registry.key().as_ref(), service_listing.service_type.as_bytes()],
+        bump = service_listing.bump,
+        constraint = service_listing.agent_registry == agent_registry.key() @ AccuralError::InvalidServiceListing
+    )]
+    pub service_listing: Box<Account<'info, ServiceListing>>,
 }
 
 #[derive(Accounts)]
@@ -421,6 +656,14 @@ pub struct ReleaseEscrow<'info> {
 
     #[account(
         mut,
+        seeds = [b"reputation", escrow_account.agent_registry.as_ref()],
+        bump = agent_reputation.bump,
+        constraint = agent_reputation.agent_registry == escrow_account.agent_registry @ AccuralError::InvalidReputation
+    )]
+    pub agent_reputation: Box<Account<'info, AgentReputation>>,
+
+    #[account(
+        mut,
         address = escrow_account.payment_intent,
         constraint = payment_intent.agent_registry == escrow_account.agent_registry @ AccuralError::InvalidPaymentIntent
     )]
@@ -462,6 +705,62 @@ pub struct ReleaseEscrow<'info> {
     pub token_program: Program<'info, Token>,
 }
 
+#[derive(Accounts)]
+pub struct CancelPaymentIntent<'info> {
+    #[account(mut)]
+    pub owner: Signer<'info>,
+
+    #[account(has_one = owner)]
+    pub agent_registry: Box<Account<'info, AgentRegistry>>,
+
+    #[account(
+        mut,
+        close = owner,
+        seeds = [b"payment_intent", agent_registry.key().as_ref(), payment_intent.task_id.as_bytes()],
+        bump = payment_intent.bump,
+        constraint = payment_intent.agent_registry == agent_registry.key() @ AccuralError::InvalidPaymentIntent
+    )]
+    pub payment_intent: Box<Account<'info, PaymentIntent>>,
+}
+
+#[derive(Accounts)]
+pub struct RefundEscrow<'info> {
+    #[account(mut)]
+    pub owner: Signer<'info>,
+
+    #[account(has_one = owner)]
+    pub agent_registry: Box<Account<'info, AgentRegistry>>,
+
+    #[account(
+        mut,
+        address = escrow_account.payment_intent,
+    )]
+    pub payment_intent: Box<Account<'info, PaymentIntent>>,
+
+    #[account(
+        mut,
+        seeds = [b"escrow", agent_registry.key().as_ref(), escrow_account.task_id.as_bytes()],
+        bump = escrow_account.bump,
+        constraint = escrow_account.agent_registry == agent_registry.key() @ AccuralError::InvalidEscrow
+    )]
+    pub escrow_account: Box<Account<'info, EscrowAccount>>,
+
+    #[account(
+        mut,
+        address = escrow_account.escrow_token_account,
+    )]
+    pub escrow_token_account: Box<Account<'info, TokenAccount>>,
+
+    #[account(
+        mut,
+        constraint = payer_token_account.owner == owner.key() @ AccuralError::InvalidTokenOwner,
+        constraint = payer_token_account.mint == escrow_account.mint @ AccuralError::InvalidMint
+    )]
+    pub payer_token_account: Box<Account<'info, TokenAccount>>,
+
+    pub token_program: Program<'info, Token>,
+}
+
 #[account]
 pub struct AgentRegistry {
     pub owner: Pubkey,
@@ -471,6 +770,33 @@ pub struct AgentRegistry {
 
 impl AgentRegistry {
     pub const LEN: usize = 8 + 32 + 4 + MAX_AGENT_ID_LEN + 1;
+}
+
+#[account]
+pub struct AgentReputation {
+    pub agent_registry: Pubkey,
+    pub total_tasks_completed: u64,
+    pub total_volume_minor: u64,
+    pub bump: u8,
+}
+
+impl AgentReputation {
+    pub const LEN: usize = 8 + 32 + 8 + 8 + 1;
+}
+
+#[account]
+pub struct ServiceListing {
+    pub agent_registry: Pubkey,
+    pub service_type: String,
+    pub description: String,
+    pub price_minor: u64,
+    pub mint: Pubkey,
+    pub active: bool,
+    pub bump: u8,
+}
+
+impl ServiceListing {
+    pub const LEN: usize = 8 + 32 + 4 + MAX_SERVICE_TYPE_LEN + 4 + MAX_DESCRIPTION_LEN + 8 + 32 + 1 + 1;
 }
 
 #[account]
@@ -559,6 +885,7 @@ pub enum PaymentIntentStatus {
 pub enum EscrowStatus {
     Funded,
     Released,
+    Refunded,
 }
 
 #[event]
@@ -574,6 +901,20 @@ pub struct PolicyUpdated {
     pub max_per_transaction: u64,
     pub session_budget: u64,
     pub version: u64,
+}
+
+#[event]
+pub struct ServiceRegistered {
+    pub agent_registry: Pubkey,
+    pub service_listing: Pubkey,
+    pub service_type: String,
+}
+
+#[event]
+pub struct ServiceDeactivated {
+    pub agent_registry: Pubkey,
+    pub service_listing: Pubkey,
+    pub service_type: String,
 }
 
 #[event]
@@ -606,6 +947,30 @@ pub struct EscrowReleased {
     pub amount: u64,
     pub beneficiary: Pubkey,
     pub verifier: Pubkey,
+    pub reconciliation_hash: [u8; 32],
+}
+
+#[event]
+pub struct PaymentCancelled {
+    pub agent_registry: Pubkey,
+    pub payment_intent: Pubkey,
+    pub task_id: String,
+}
+
+#[event]
+pub struct EscrowRefunded {
+    pub agent_registry: Pubkey,
+    pub escrow: Pubkey,
+    pub task_id: String,
+    pub amount: u64,
+}
+
+#[event]
+pub struct DirectPaymentMade {
+    pub agent_registry: Pubkey,
+    pub task_id: String,
+    pub amount: u64,
+    pub recipient: Pubkey,
     pub reconciliation_hash: [u8; 32],
 }
 
@@ -678,4 +1043,14 @@ pub enum AccuralError {
     PaymentIntentNotRequested,
     #[msg("Payment intent does not match escrow details")]
     PaymentIntentMismatch,
+    #[msg("Escrow account is invalid")]
+    InvalidEscrow,
+    #[msg("Service type must be 1-32 ASCII characters")]
+    InvalidServiceType,
+    #[msg("Description is empty or too long")]
+    DescriptionTooLong,
+    #[msg("Service listing account is invalid")]
+    InvalidServiceListing,
+    #[msg("Agent reputation account is invalid")]
+    InvalidReputation,
 }

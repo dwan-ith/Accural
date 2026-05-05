@@ -28,26 +28,47 @@ const ACTION_CREATE_ESCROW = 1 << 1;
 const ACTION_RELEASE_ESCROW = 1 << 2;
 
 type DecodedPolicy = {
+  agentRegistry: PublicKey;
   maxPerTransaction: bigint;
   sessionBudgetTotal: bigint;
   sessionBudgetRemaining: bigint;
+  approvalRequiredAbove: bigint;
   allowedActions: number;
   version: bigint;
+  bump: number;
 };
 
 type DecodedPaymentIntent = {
+  agentRegistry: PublicKey;
   taskId: string;
   amount: bigint;
+  mint: PublicKey;
   recipient: PublicKey;
+  purpose: string;
+  expiresAt: bigint;
   status: number;
+  bump: number;
 };
 
 type DecodedEscrow = {
+  agentRegistry: PublicKey;
   taskId: string;
   amount: bigint;
+  mint: PublicKey;
+  escrowTokenAccount: PublicKey;
+  paymentIntent: PublicKey;
   beneficiary: PublicKey;
   verifier: PublicKey;
+  policyVersion: bigint;
   status: number;
+  bump: number;
+};
+
+type DecodedReputation = {
+  agentRegistry: PublicKey;
+  totalTasksCompleted: bigint;
+  totalVolumeMinor: bigint;
+  bump: number;
 };
 
 async function main() {
@@ -85,6 +106,7 @@ async function main() {
 
   const agentRegistry = pda(["registry", owner.publicKey, agentId]);
   const policyVault = pda(["policy", agentRegistry]);
+  const agentReputation = pda(["reputation", agentRegistry]);
   const paymentIntent = pda(["payment_intent", agentRegistry, taskId]);
   const escrowAccount = pda(["escrow", agentRegistry, taskId]);
   const reconciliationRecord = pda(["reconciliation", escrowAccount]);
@@ -96,6 +118,7 @@ async function main() {
       owner: owner.publicKey,
       agentRegistry,
       policyVault,
+      agentReputation,
       agentId,
     }),
     [owner],
@@ -195,6 +218,7 @@ async function main() {
     releaseEscrowIx({
       verifier: verifier.publicKey,
       policyVault,
+      agentReputation,
       paymentIntent,
       escrowAccount,
       escrowTokenAccount,
@@ -214,6 +238,10 @@ async function main() {
 
   const beneficiaryTokenState = await getAccount(connection, beneficiaryToken.address);
   assert.equal(beneficiaryTokenState.amount, amount);
+
+  const reputation = await fetchReputation(connection, agentReputation);
+  assert.equal(reputation.totalTasksCompleted, 1n);
+  assert.equal(reputation.totalVolumeMinor, amount);
 
   const reconciliationInfo = await connection.getAccountInfo(reconciliationRecord, "confirmed");
   assert.ok(reconciliationInfo, "reconciliation account should exist");
@@ -244,12 +272,14 @@ function initializeAgentIx(input: {
   owner: PublicKey;
   agentRegistry: PublicKey;
   policyVault: PublicKey;
+  agentReputation: PublicKey;
   agentId: string;
 }) {
   return ix("initialize_agent", encodeString(input.agentId), [
     meta(input.owner, true, true),
     meta(input.agentRegistry, false, true),
     meta(input.policyVault, false, true),
+    meta(input.agentReputation, false, true),
     meta(SystemProgram.programId, false, false),
   ]);
 }
@@ -355,6 +385,7 @@ function fundEscrowIx(input: {
 function releaseEscrowIx(input: {
   verifier: PublicKey;
   policyVault: PublicKey;
+  agentReputation: PublicKey;
   paymentIntent: PublicKey;
   escrowAccount: PublicKey;
   escrowTokenAccount: PublicKey;
@@ -374,6 +405,7 @@ function releaseEscrowIx(input: {
     [
       meta(input.verifier, true, true),
       meta(input.policyVault, false, false),
+      meta(input.agentReputation, false, true),
       meta(input.paymentIntent, false, true),
       meta(input.escrowAccount, false, true),
       meta(input.escrowTokenAccount, false, true),
@@ -388,19 +420,15 @@ function releaseEscrowIx(input: {
 async function fetchPolicy(connection: Connection, address: PublicKey): Promise<DecodedPolicy> {
   const data = await fetchAccountData(connection, address, "PolicyVault");
   const cursor = new Cursor(data.subarray(8));
-  cursor.pubkey();
   return {
+    agentRegistry: cursor.pubkey(),
     maxPerTransaction: cursor.u64(),
     sessionBudgetTotal: cursor.u64(),
     sessionBudgetRemaining: cursor.u64(),
-    allowedActions: (() => {
-      cursor.u64();
-      const actions = cursor.u16();
-      cursor.u64();
-      cursor.u8();
-      return actions;
-    })(),
-    version: 0n,
+    approvalRequiredAbove: cursor.u64(),
+    allowedActions: cursor.u16(),
+    version: cursor.u64(),
+    bump: cursor.u8(),
   };
 }
 
@@ -410,40 +438,45 @@ async function fetchPaymentIntent(
 ): Promise<DecodedPaymentIntent> {
   const data = await fetchAccountData(connection, address, "PaymentIntent");
   const cursor = new Cursor(data.subarray(8));
-  cursor.pubkey();
   return {
+    agentRegistry: cursor.pubkey(),
     taskId: cursor.string(),
     amount: cursor.u64(),
-    recipient: (() => {
-      cursor.pubkey();
-      return cursor.pubkey();
-    })(),
-    status: (() => {
-      cursor.string();
-      cursor.i64();
-      return cursor.u8();
-    })(),
+    mint: cursor.pubkey(),
+    recipient: cursor.pubkey(),
+    purpose: cursor.string(),
+    expiresAt: cursor.i64(),
+    status: cursor.u8(),
+    bump: cursor.u8(),
   };
 }
 
 async function fetchEscrow(connection: Connection, address: PublicKey): Promise<DecodedEscrow> {
   const data = await fetchAccountData(connection, address, "EscrowAccount");
   const cursor = new Cursor(data.subarray(8));
-  cursor.pubkey();
   return {
+    agentRegistry: cursor.pubkey(),
     taskId: cursor.string(),
     amount: cursor.u64(),
-    beneficiary: (() => {
-      cursor.pubkey();
-      cursor.pubkey();
-      cursor.pubkey();
-      return cursor.pubkey();
-    })(),
+    mint: cursor.pubkey(),
+    escrowTokenAccount: cursor.pubkey(),
+    paymentIntent: cursor.pubkey(),
+    beneficiary: cursor.pubkey(),
     verifier: cursor.pubkey(),
-    status: (() => {
-      cursor.u64();
-      return cursor.u8();
-    })(),
+    policyVersion: cursor.u64(),
+    status: cursor.u8(),
+    bump: cursor.u8(),
+  };
+}
+
+async function fetchReputation(connection: Connection, address: PublicKey): Promise<DecodedReputation> {
+  const data = await fetchAccountData(connection, address, "AgentReputation");
+  const cursor = new Cursor(data.subarray(8));
+  return {
+    agentRegistry: cursor.pubkey(),
+    totalTasksCompleted: cursor.u64(),
+    totalVolumeMinor: cursor.u64(),
+    bump: cursor.u8(),
   };
 }
 

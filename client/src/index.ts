@@ -80,6 +80,24 @@ server.registerTool(
 );
 
 server.registerTool(
+  "get_reputation",
+  {
+    title: "Get Agent Reputation",
+    description: "Return the agent's on-chain reputation based on completed payments and volume.",
+    inputSchema: {
+      agentId: z.string(),
+    },
+  },
+  async (input) => {
+    try {
+      return result(await runtime.getReputation(input.agentId));
+    } catch (error) {
+      return failure(error);
+    }
+  },
+);
+
+server.registerTool(
   "set_spend_policy",
   {
     title: "Set Spend Policy",
@@ -102,6 +120,45 @@ server.registerTool(
   async (input) => {
     try {
       return result(await runtime.setSpendPolicy(input));
+    } catch (error) {
+      return failure(error);
+    }
+  },
+);
+
+server.registerTool(
+  "register_service",
+  {
+    title: "Register Service",
+    description: "Register a discoverable service listing for an agent. Acts as the network's agent discovery layer.",
+    inputSchema: {
+      agentId: z.string(),
+      serviceType: z.string().max(32),
+      description: z.string().max(160),
+      price: z.string().describe("USDC price string, e.g. 5.00"),
+    },
+  },
+  async (input) => {
+    try {
+      return result(await runtime.registerService(input));
+    } catch (error) {
+      return failure(error);
+    }
+  },
+);
+
+server.registerTool(
+  "list_services",
+  {
+    title: "List Services",
+    description: "Discover agents offering specific services. This acts as the Accural agent directory.",
+    inputSchema: {
+      serviceType: z.string().optional().describe("Optional substring filter for service type"),
+    },
+  },
+  async (input) => {
+    try {
+      return result(await runtime.listServices(input));
     } catch (error) {
       return failure(error);
     }
@@ -176,6 +233,29 @@ server.registerTool(
   async (input) => {
     try {
       return result(await runtime.releaseEscrow(input));
+    } catch (error) {
+      return failure(error);
+    }
+  },
+);
+
+server.registerTool(
+  "direct_payment",
+  {
+    title: "Direct Payment",
+    description: "Make a direct payment from the agent's policy budget to a recipient without an escrow.",
+    inputSchema: {
+      payerAgentId: z.string(),
+      taskId: z.string(),
+      amount: z.string().describe("USDC amount, e.g. 5.00"),
+      recipientPubkey: z.string(),
+      purpose: z.string(),
+      proofUri: z.string().describe("URI for report, commit, or artifact."),
+    },
+  },
+  async (input) => {
+    try {
+      return result(await runtime.directPayment(input));
     } catch (error) {
       return failure(error);
     }

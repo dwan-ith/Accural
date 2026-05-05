@@ -20,7 +20,7 @@ export class OpenAiResponsesClient implements LlmClient {
     }
 
     this.apiKey = apiKey;
-    this.model = input.model ?? process.env.ACCURAL_LLM_MODEL ?? "gpt-5.2";
+    this.model = input.model ?? process.env.ACCURAL_LLM_MODEL ?? "gpt-4o";
     this.baseUrl = input.baseUrl ?? process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1";
   }
 

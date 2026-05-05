@@ -3,14 +3,26 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const dbPath = process.env.ACCURAL_DB_PATH ?? join(__dirname, "..", "reconciliation.db");
-const db = new sqlite3.Database(dbPath);
+let db: sqlite3.Database;
 
+function getDb(): sqlite3.Database {
+  if (!db) {
+    throw new Error("Database not initialized. Call initDb() first.");
+  }
+  return db;
+}
 export type AgentRecord = {
   agent_id: string;
   wallet_pubkey: string;
   owner_pubkey: string;
   created_at: string;
+};
+
+export type AgentReputationRecord = {
+  agent_id: string;
+  total_tasks_completed: number;
+  total_volume_minor: string;
+  updated_at: string;
 };
 
 export type PolicyRecord = {
@@ -22,6 +34,17 @@ export type PolicyRecord = {
   allowed_actions_json: string;
   blocked_recipients_json: string;
   version: number;
+  updated_at: string;
+};
+
+export type ServiceRecord = {
+  service_type: string;
+  agent_id: string;
+  description: string;
+  price_minor: string;
+  asset: string;
+  active: number;
+  created_at: string;
   updated_at: string;
 };
 
@@ -71,7 +94,7 @@ export type ReconciliationRecord = {
 
 function run(sql: string, params: unknown[] = []) {
   return new Promise<{ changes: number; lastID: number }>((resolve, reject) => {
-    db.run(sql, params, function onRun(err) {
+    getDb().run(sql, params, function onRun(err) {
       if (err) {
         reject(err);
       } else {
@@ -95,7 +118,7 @@ export async function withTransaction<T>(work: () => Promise<T>): Promise<T> {
 
 function get<T>(sql: string, params: unknown[] = []) {
   return new Promise<T | undefined>((resolve, reject) => {
-    db.get(sql, params, (err, row) => {
+    getDb().get(sql, params, (err, row) => {
       if (err) {
         reject(err);
       } else {
@@ -107,7 +130,7 @@ function get<T>(sql: string, params: unknown[] = []) {
 
 function all<T>(sql: string, params: unknown[] = []) {
   return new Promise<T[]>((resolve, reject) => {
-    db.all(sql, params, (err, rows) => {
+    getDb().all(sql, params, (err, rows) => {
       if (err) {
         reject(err);
       } else {
@@ -117,7 +140,10 @@ function all<T>(sql: string, params: unknown[] = []) {
   });
 }
 
-export async function initDb() {
+export async function initDb(customPath?: string) {
+  if (db) return;
+  const dbPath = customPath ?? process.env.ACCURAL_DB_PATH ?? join(__dirname, "..", "reconciliation.db");
+  db = new sqlite3.Database(dbPath);
   await run("PRAGMA foreign_keys = ON");
   await migrateLegacyTables();
   await run(`
@@ -188,6 +214,26 @@ export async function initDb() {
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     )
   `);
+  await run(`
+    CREATE TABLE IF NOT EXISTS services (
+      service_type TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL REFERENCES agents(agent_id) ON DELETE CASCADE,
+      description TEXT NOT NULL,
+      price_minor TEXT NOT NULL,
+      asset TEXT NOT NULL,
+      active INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  await run(`
+    CREATE TABLE IF NOT EXISTS reputations (
+      agent_id TEXT PRIMARY KEY REFERENCES agents(agent_id) ON DELETE CASCADE,
+      total_tasks_completed INTEGER NOT NULL DEFAULT 0,
+      total_volume_minor TEXT NOT NULL DEFAULT '0',
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
 }
 
 async function migrateLegacyTables() {
@@ -203,6 +249,7 @@ async function migrateLegacyTables() {
       "blocked_recipients_json",
       "version",
     ],
+    services: ["service_type", "agent_id", "description", "price_minor", "asset", "active"],
     payment_intents: ["intent_id", "task_id", "requester_agent_id", "recipient_pubkey", "amount_minor"],
     escrows: ["escrow_id", "task_id", "payer_agent_id", "beneficiary_pubkey", "verifier_pubkey"],
     reconciliation_records: ["record_id", "transaction_signature", "task_id", "semantic_hash"],
@@ -245,6 +292,35 @@ export async function upsertAgent(agent: {
 
 export function getAgent(agentId: string) {
   return get<AgentRecord>("SELECT * FROM agents WHERE agent_id = ?", [agentId]);
+}
+
+export async function upsertReputation(agentId: string, tasksToAdd: number, volumeToAddMinor: bigint) {
+  const existing = await getReputation(agentId);
+  if (!existing) {
+    await run(
+      `
+        INSERT INTO reputations (agent_id, total_tasks_completed, total_volume_minor)
+        VALUES (?, ?, ?)
+      `,
+      [agentId, tasksToAdd, volumeToAddMinor.toString()],
+    );
+  } else {
+    const newTasks = existing.total_tasks_completed + tasksToAdd;
+    const newVolume = BigInt(existing.total_volume_minor) + volumeToAddMinor;
+    await run(
+      `
+        UPDATE reputations
+        SET total_tasks_completed = ?, total_volume_minor = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE agent_id = ?
+      `,
+      [newTasks, newVolume.toString(), agentId],
+    );
+  }
+  return getReputation(agentId);
+}
+
+export function getReputation(agentId: string) {
+  return get<AgentReputationRecord>("SELECT * FROM reputations WHERE agent_id = ?", [agentId]);
 }
 
 export async function upsertPolicy(policy: {
@@ -459,5 +535,7 @@ export async function resetDemoState() {
   await run("DELETE FROM escrows");
   await run("DELETE FROM payment_intents");
   await run("DELETE FROM policies");
+  await run("DELETE FROM reputations");
+  await run("DELETE FROM services");
   await run("DELETE FROM agents");
 }

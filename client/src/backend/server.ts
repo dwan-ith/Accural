@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { AccuralRuntime, type CreateEscrowInput, type ReleaseEscrowInput, type RequestPaymentInput, type SetPolicyInput } from "../protocol.js";
+import { AccuralRuntime, type CreateEscrowInput, type ReleaseEscrowInput, type RequestPaymentInput, type SetPolicyInput, type DirectPaymentInput } from "../protocol.js";
 import { runAgentDemo } from "../agents/run.js";
 import type { AgentMode, CampaignGoal } from "../agents/types.js";
 
@@ -67,6 +67,12 @@ async function handleRequest(
     return;
   }
 
+  if (method === "GET" && parts.length === 3 && parts[0] === "agents" && parts[2] === "reputation") {
+    const result = await runtime.getReputation(parts[1]!);
+    sendJson(response, 200, result);
+    return;
+  }
+
   if (method === "POST" && url.pathname === "/policies") {
     const body = await readJsonObject(request);
     const result = await runtime.setSpendPolicy({
@@ -123,9 +129,42 @@ async function handleRequest(
     return;
   }
 
+  if (method === "POST" && url.pathname === "/direct-payments") {
+    const body = await readJsonObject(request);
+    const result = await runtime.directPayment({
+      payerAgentId: requiredString(body, "payerAgentId"),
+      taskId: requiredString(body, "taskId"),
+      amount: requiredString(body, "amount"),
+      recipientPubkey: requiredString(body, "recipientPubkey"),
+      purpose: requiredString(body, "purpose"),
+      proofUri: requiredString(body, "proofUri"),
+    } satisfies DirectPaymentInput);
+    sendJson(response, 201, result);
+    return;
+  }
+
   if (method === "GET" && url.pathname === "/reconciliation") {
     const taskId = url.searchParams.get("taskId") ?? undefined;
     const result = await runtime.reconcilePayment(taskId);
+    sendJson(response, 200, result);
+    return;
+  }
+
+  if (method === "POST" && url.pathname === "/services") {
+    const body = await readJsonObject(request);
+    const result = await runtime.registerService({
+      agentId: requiredString(body, "agentId"),
+      serviceType: requiredString(body, "serviceType"),
+      description: requiredString(body, "description"),
+      price: requiredString(body, "price"),
+    });
+    sendJson(response, 201, result);
+    return;
+  }
+
+  if (method === "GET" && url.pathname === "/services") {
+    const serviceType = url.searchParams.get("serviceType") ?? undefined;
+    const result = await runtime.listServices({ serviceType });
     sendJson(response, 200, result);
     return;
   }
@@ -148,10 +187,12 @@ async function handleRequest(
       "GET /health",
       "POST /agents",
       "GET /agents/:agentId/balance",
+      "GET /agents/:agentId/reputation",
       "POST /policies",
       "POST /payment-intents",
       "POST /escrows",
       "POST /escrows/:taskId/release",
+      "POST /direct-payments",
       "GET /reconciliation?taskId=:taskId",
       "POST /agent-runs",
     ],
