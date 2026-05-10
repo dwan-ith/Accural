@@ -376,6 +376,58 @@ export function getPolicy(agentId: string) {
   return get<PolicyRecord>("SELECT * FROM policies WHERE agent_id = ?", [agentId]);
 }
 
+export async function upsertService(service: {
+  service_type: string;
+  agent_id: string;
+  description: string;
+  price_minor: string;
+  asset: string;
+  active: number;
+}) {
+  await run(
+    `
+      INSERT INTO services (
+        service_type,
+        agent_id,
+        description,
+        price_minor,
+        asset,
+        active,
+        updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(service_type) DO UPDATE SET
+        agent_id = excluded.agent_id,
+        description = excluded.description,
+        price_minor = excluded.price_minor,
+        asset = excluded.asset,
+        active = excluded.active,
+        updated_at = CURRENT_TIMESTAMP
+    `,
+    [
+      service.service_type,
+      service.agent_id,
+      service.description,
+      service.price_minor,
+      service.asset,
+      service.active,
+    ],
+  );
+  return get<ServiceRecord>("SELECT * FROM services WHERE service_type = ?", [service.service_type]);
+}
+
+export function listServices(serviceType?: string) {
+  if (serviceType) {
+    return all<ServiceRecord>(
+      "SELECT * FROM services WHERE service_type = ? AND active = 1 ORDER BY created_at ASC, service_type ASC",
+      [serviceType],
+    );
+  }
+  return all<ServiceRecord>(
+    "SELECT * FROM services WHERE active = 1 ORDER BY created_at ASC, service_type ASC",
+  );
+}
+
 export async function createPaymentIntent(intent: Omit<PaymentIntentRecord, "created_at">) {
   await run(
     `

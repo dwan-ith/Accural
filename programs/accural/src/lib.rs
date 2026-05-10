@@ -761,6 +761,55 @@ pub struct RefundEscrow<'info> {
     pub token_program: Program<'info, Token>,
 }
 
+#[derive(Accounts)]
+#[instruction(task_id: String)]
+pub struct DirectPayment<'info> {
+    #[account(mut)]
+    pub owner: Signer<'info>,
+
+    #[account(has_one = owner)]
+    pub agent_registry: Box<Account<'info, AgentRegistry>>,
+
+    #[account(
+        mut,
+        seeds = [b"policy", agent_registry.key().as_ref()],
+        bump = policy_vault.bump,
+        constraint = policy_vault.agent_registry == agent_registry.key() @ AccuralError::InvalidPolicyVault
+    )]
+    pub policy_vault: Box<Account<'info, PolicyVault>>,
+
+    #[account(
+        init,
+        payer = owner,
+        space = ReconciliationRecord::LEN,
+        seeds = [b"reconciliation", agent_registry.key().as_ref(), task_id.as_bytes()],
+        bump
+    )]
+    pub reconciliation_record: Box<Account<'info, ReconciliationRecord>>,
+
+    #[account(
+        mut,
+        constraint = payer_token_account.owner == owner.key() @ AccuralError::InvalidTokenOwner,
+        constraint = payer_token_account.mint == mint.key() @ AccuralError::InvalidMint
+    )]
+    pub payer_token_account: Box<Account<'info, TokenAccount>>,
+
+    #[account(
+        mut,
+        constraint = recipient_token_account.owner == recipient.key() @ AccuralError::InvalidBeneficiary,
+        constraint = recipient_token_account.mint == mint.key() @ AccuralError::InvalidMint
+    )]
+    pub recipient_token_account: Box<Account<'info, TokenAccount>>,
+
+    pub mint: Box<Account<'info, Mint>>,
+
+    /// CHECK: Recipient identity is enforced through recipient_token_account ownership.
+    pub recipient: AccountInfo<'info>,
+
+    pub system_program: Program<'info, System>,
+    pub token_program: Program<'info, Token>,
+}
+
 #[account]
 pub struct AgentRegistry {
     pub owner: Pubkey,

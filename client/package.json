@@ -1,6 +1,7 @@
+{
   "name": "accural",
   "version": "1.0.0",
-  "description": "Agent-native financial coordination protocol — crypto Stripe Link for AI agents.",
+  "description": "Agent-native financial coordination protocol - crypto Stripe Link for AI agents.",
   "main": "dist/index.js",
   "scripts": {
     "check": "tsc --noEmit",
@@ -9,9 +10,14 @@
     "demo": "npm run build && node dist/test.js",
     "agents:demo": "npm run build && node dist/agents-demo.js",
     "agents:demo:llm": "npm run build && node dist/agents-demo.js llm",
+    "agents:solana-plan": "npm run build && node dist/agents-solana-plan.js",
+    "agents:solana-plan:llm": "npm run build && node dist/agents-solana-plan.js llm",
+    "solana:execute-bundle": "npm run build && node dist/execute-solana-bundle.js",
     "backend:start": "npm run build && node dist/backend/server.js",
+    "solana:status": "npm run build && node dist/solana-status.js",
     "solana:e2e": "npm run build && node dist/solana-e2e.js",
-    "test": "npm run check && npm run build && node dist/protocol.test.js && node dist/agents/agents.test.js && node dist/backend/server.test.js"
+    "agent-solana:e2e": "npm run build && node dist/agent-solana-e2e.js",
+    "test": "npm run check && npm run build && node dist/protocol.test.js && node dist/agents/agents.test.js && node dist/backend/server.test.js && node dist/solana/accural-client.test.js && node dist/solana/execute-bundle.test.js && node dist/solana/program-consistency.test.js"
   },
   "keywords": [],
   "author": "",

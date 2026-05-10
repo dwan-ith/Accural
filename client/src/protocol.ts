@@ -580,7 +580,7 @@ export class AccuralRuntime {
   private async writeDirectPaymentReconciliation(input: {
     taskId: string;
     payerAgentId: string;
-    amountMinor: string;
+    amountMinor: bigint;
     policy: PolicyRecord;
     eventType: string;
     purpose: string;
@@ -596,7 +596,7 @@ export class AccuralRuntime {
       taskId: input.taskId,
       agentId: input.payerAgentId,
       eventType: input.eventType,
-      amountMinor: input.amountMinor,
+      amountMinor: input.amountMinor.toString(),
       asset: DEFAULT_ASSET,
       purpose: input.purpose,
       outcome: input.outcome,
@@ -610,7 +610,7 @@ export class AccuralRuntime {
       task_id: input.taskId,
       agent_id: input.payerAgentId,
       event_type: input.eventType,
-      amount_minor: input.amountMinor,
+      amount_minor: input.amountMinor.toString(),
       asset: DEFAULT_ASSET,
       purpose: input.purpose,
       outcome: input.outcome,

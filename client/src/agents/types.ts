@@ -1,3 +1,5 @@
+import type { InstructionPlan, TransactionBundlePlan } from "../solana/accural-client.js";
+
 export type AgentMode = "deterministic" | "llm";
 
 export type CampaignGoal = {
@@ -163,5 +165,52 @@ export type AgentRunResult = {
     release: ReleaseResult;
     reconciliation: ReconciliationEntry[];
     finalBalance: BalanceResult;
+  };
+};
+
+export type SignedInstructionPlan = {
+  signerPubkeys: string[];
+  instruction: InstructionPlan;
+};
+
+export type AgentSolanaPlanResult = {
+  mode: AgentMode;
+  settlementMode: "solana-plan";
+  goal: CampaignGoal;
+  plan: AssignmentPlan;
+  proposal: WorkProposal;
+  delivery: WorkDelivery;
+  verification: VerificationDecision;
+  solana: {
+    participants: {
+      ownerPubkey: string;
+      workerPubkey: string;
+      verifierPubkey: string;
+      mint: string;
+      payerTokenAccount: string;
+      escrowTokenAccount: string;
+      beneficiaryTokenAccount: string;
+    };
+    addresses: {
+      agentRegistry: string;
+      policyVault: string;
+      agentReputation: string;
+      paymentIntent: string;
+      escrowAccount: string;
+      reconciliationRecord: string;
+    };
+    instructions: {
+      setupPayerTokenAccount?: SignedInstructionPlan;
+      setupEscrowTokenAccount?: SignedInstructionPlan;
+      setupBeneficiaryTokenAccount?: SignedInstructionPlan;
+      initializeAgent: SignedInstructionPlan;
+      setPolicy: SignedInstructionPlan;
+      requestPayment: SignedInstructionPlan;
+      fundEscrow: SignedInstructionPlan;
+      releaseEscrow: SignedInstructionPlan;
+    };
+    transactionBundle: TransactionBundlePlan;
+    reconciliationHashHex: string;
+    preconditions: string[];
   };
 };

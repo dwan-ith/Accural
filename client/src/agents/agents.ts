@@ -50,7 +50,7 @@ export class SpecialistWorkerAgent {
       return {
         agentId: this.agentId,
         amount: "10",
-        purpose: `Produce artifact for ${plan.taskId}: ${plan.taskBrief}`,
+        purpose: `Produce artifact for ${plan.taskId}.`,
       };
     }
 

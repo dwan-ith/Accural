@@ -14,8 +14,11 @@ function pubkey() {
   return Keypair.generate().publicKey.toBase58();
 }
 
-async function withBackend<T>(fn: (baseUrl: string) => Promise<T>) {
-  const server = await createBackendServer();
+async function withBackend<T>(
+  fn: (baseUrl: string) => Promise<T>,
+  options?: Parameters<typeof createBackendServer>[0],
+) {
+  const server = await createBackendServer(options);
   await new Promise<void>((resolveListen) => {
     server.listen(0, "127.0.0.1", resolveListen);
   });
@@ -55,6 +58,15 @@ test("serves the policy, escrow, release, and reconciliation backend API over HT
     const health = await requestJson<{ ok: boolean; service: string }>(baseUrl, "/health");
     assert.equal(health.ok, true);
     assert.equal(health.service, "accural-backend");
+
+    const settlement = await requestJson<{
+      settlementMode: string;
+      ready: boolean;
+      settlesOnChain: boolean;
+    }>(baseUrl, "/settlement/status");
+    assert.equal(settlement.settlementMode, "local-sqlite-control-plane");
+    assert.equal(settlement.ready, true);
+    assert.equal(settlement.settlesOnChain, false);
 
     const agent = await requestJson<{ agentId: string; walletPubkey: string }>(baseUrl, "/agents", {
       method: "POST",
@@ -163,4 +175,163 @@ test("runs the deterministic agent backend endpoint without requiring an LLM key
       ["ESCROW_FUNDED", "ESCROW_RELEASED"],
     );
   });
+});
+
+test("serves Solana instruction plans in explicit solana settlement mode", async () => {
+  await withBackend(
+    async (baseUrl) => {
+      const ownerPubkey = pubkey();
+      const beneficiaryPubkey = pubkey();
+      const verifierPubkey = pubkey();
+      const mint = pubkey();
+      const escrowTokenAccount = pubkey();
+      const payerTokenAccount = pubkey();
+      const beneficiaryTokenAccount = pubkey();
+
+      const initialize = await requestJson<{
+        settlementMode: string;
+        signerPubkeys: string[];
+        addresses: { agentRegistry: string; policyVault: string };
+        instruction: { programId: string; dataBase64: string; keys: Array<{ pubkey: string; isSigner: boolean; isWritable: boolean }> };
+      }>(baseUrl, "/solana/agents/initialize-plan", {
+        method: "POST",
+        body: JSON.stringify({
+          ownerPubkey,
+          agentId: "api-agent",
+        }),
+      });
+
+      assert.equal(initialize.settlementMode, "solana-rpc-control-plane");
+      assert.deepEqual(initialize.signerPubkeys, [ownerPubkey]);
+      assert.ok(initialize.addresses.agentRegistry);
+      assert.equal(initialize.instruction.keys[0]?.pubkey, ownerPubkey);
+      assert.equal(initialize.instruction.keys[0]?.isSigner, true);
+
+      const requestIntent = await requestJson<{
+          addresses: { paymentIntent: string; escrowAccount: string; reconciliationRecord: string };
+        instruction: { keys: Array<{ pubkey: string; isSigner: boolean; isWritable: boolean }> };
+      }>(baseUrl, "/solana/payment-intents/request-plan", {
+        method: "POST",
+        body: JSON.stringify({
+          ownerPubkey,
+          agentId: "api-agent",
+          taskId: "api-task",
+          amount: "10",
+          mint,
+          recipientPubkey: beneficiaryPubkey,
+          purpose: "Backend planned payment intent",
+        }),
+      });
+
+      assert.ok(requestIntent.addresses.paymentIntent);
+      assert.equal(requestIntent.instruction.keys[0]?.pubkey, ownerPubkey);
+
+      const fund = await requestJson<{
+        signerPubkeys: string[];
+        addresses: { paymentIntent: string; escrowAccount: string };
+        tokenAccounts: { payerTokenAccount: string; escrowTokenAccount: string; beneficiaryTokenAccount: string };
+        setupInstructions: {
+          setupPayerTokenAccount: { signerPubkeys: string[]; instruction: { keys: Array<{ pubkey: string }> } };
+          setupEscrowTokenAccount: { signerPubkeys: string[]; instruction: { keys: Array<{ pubkey: string }> } };
+          setupBeneficiaryTokenAccount: { signerPubkeys: string[]; instruction: { keys: Array<{ pubkey: string }> } };
+        };
+        preconditions: string[];
+        instruction: { keys: Array<{ pubkey: string; isSigner: boolean; isWritable: boolean }> };
+      }>(baseUrl, "/solana/escrows/fund-plan", {
+        method: "POST",
+        body: JSON.stringify({
+          ownerPubkey,
+          agentId: "api-agent",
+          taskId: "api-task",
+          amount: "10",
+          purpose: "Backend planned payment intent",
+          mint,
+          beneficiaryPubkey,
+          verifierPubkey,
+        }),
+      });
+
+      assert.deepEqual(fund.signerPubkeys, [ownerPubkey]);
+      assert.equal(fund.addresses.paymentIntent, requestIntent.addresses.paymentIntent);
+      assert.equal(fund.instruction.keys[3]?.pubkey, requestIntent.addresses.paymentIntent);
+      assert.equal(fund.instruction.keys[5]?.pubkey, fund.tokenAccounts.escrowTokenAccount);
+      assert.equal(fund.instruction.keys[6]?.pubkey, fund.tokenAccounts.payerTokenAccount);
+      assert.deepEqual(fund.setupInstructions.setupEscrowTokenAccount.signerPubkeys, [ownerPubkey]);
+      assert.equal(fund.setupInstructions.setupEscrowTokenAccount.instruction.keys[1]?.pubkey, fund.tokenAccounts.escrowTokenAccount);
+      assert.ok(fund.preconditions.some((item) => item.includes("payment intent")));
+
+      const release = await requestJson<{
+        signerPubkeys: string[];
+        addresses: { reconciliationRecord: string };
+        instruction: { keys: Array<{ pubkey: string; isSigner: boolean; isWritable: boolean }> };
+      }>(baseUrl, "/solana/escrows/release-plan", {
+        method: "POST",
+        body: JSON.stringify({
+          ownerPubkey,
+          agentId: "api-agent",
+          taskId: "api-task",
+          verifierPubkey,
+          escrowTokenAccount: fund.tokenAccounts.escrowTokenAccount,
+          beneficiaryTokenAccount: fund.tokenAccounts.beneficiaryTokenAccount,
+          proofUri: "ipfs://proof/api-task",
+        }),
+      });
+
+      assert.deepEqual(release.signerPubkeys, [verifierPubkey]);
+      assert.equal(release.addresses.reconciliationRecord, requestIntent.addresses.reconciliationRecord);
+      assert.equal(release.instruction.keys[0]?.pubkey, verifierPubkey);
+      assert.equal(release.instruction.keys[0]?.isSigner, true);
+
+      const agentRun = await requestJson<{
+        settlementMode: string;
+        solana: {
+          participants: { ownerPubkey: string; workerPubkey: string; verifierPubkey: string };
+          addresses: { agentReputation: string; paymentIntent: string; reconciliationRecord: string };
+          transactionBundle: { phases: Array<{ phase: string; signerPubkeys: string[]; instructions: unknown[] }> };
+          instructions: {
+            requestPayment: { instruction: { keys: Array<{ pubkey: string }> } };
+            fundEscrow: { signerPubkeys: string[]; instruction: { keys: Array<{ pubkey: string }> } };
+            releaseEscrow: { signerPubkeys: string[]; instruction: { keys: Array<{ pubkey: string }> } };
+          };
+        };
+      }>(baseUrl, "/agent-runs/solana-plan", {
+        method: "POST",
+        body: JSON.stringify({
+          mode: "deterministic",
+          ownerPubkey,
+          workerPubkey: beneficiaryPubkey,
+          verifierPubkey,
+          mint,
+          escrowTokenAccount,
+          payerTokenAccount,
+          beneficiaryTokenAccount,
+          goal: {
+            goal: "Ship a backend Solana-planned campaign artifact.",
+            budget: "30",
+            taskId: "api-agent-run-plan",
+          },
+        }),
+      });
+
+      assert.equal(agentRun.settlementMode, "solana-plan");
+      assert.equal(agentRun.solana.participants.ownerPubkey, ownerPubkey);
+      assert.equal(agentRun.solana.instructions.fundEscrow.signerPubkeys[0], ownerPubkey);
+      assert.equal(agentRun.solana.instructions.releaseEscrow.signerPubkeys[0], verifierPubkey);
+      assert.deepEqual(
+        agentRun.solana.transactionBundle.phases.map((phase) => phase.phase),
+        ["initialize-agent-policy", "request-and-fund-escrow", "release-escrow"],
+      );
+      assert.equal(agentRun.solana.transactionBundle.phases[1]?.instructions.length, 2);
+      assert.equal(
+        agentRun.solana.instructions.requestPayment.instruction.keys[3]?.pubkey,
+        agentRun.solana.addresses.paymentIntent,
+      );
+      assert.equal(
+        agentRun.solana.instructions.releaseEscrow.instruction.keys[7]?.pubkey,
+        agentRun.solana.addresses.reconciliationRecord,
+      );
+      assert.match(agentRun.solana.addresses.agentReputation, /^[1-9A-HJ-NP-Za-km-z]{32,44}$/);
+    },
+    { settlementMode: "solana-rpc-control-plane", solanaRpcUrl: "http://127.0.0.1:8899" },
+  );
 });
