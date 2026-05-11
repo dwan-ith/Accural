@@ -1,10 +1,22 @@
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import {
+  createServer,
+  type IncomingMessage,
+  type Server,
+  type ServerResponse,
+} from "node:http";
 import { extname, relative, resolve } from "node:path";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import { PublicKey } from "@solana/web3.js";
-import { AccuralRuntime, type CreateEscrowInput, type DirectPaymentInput, type ReleaseEscrowInput, type RequestPaymentInput, type SetPolicyInput } from "../protocol.js";
+import {
+  AccuralRuntime,
+  type CreateEscrowInput,
+  type DirectPaymentInput,
+  type ReleaseEscrowInput,
+  type RequestPaymentInput,
+  type SetPolicyInput,
+} from "../protocol.js";
 import { runAgentDemo, runAgentSolanaPlan } from "../agents/run.js";
 import { parseUsdcAmount } from "../money.js";
 import { ACTION_ALL, AccuralSolanaClient } from "../solana/accural-client.js";
@@ -12,7 +24,9 @@ import type { AgentMode, CampaignGoal } from "../agents/types.js";
 
 type JsonObject = Record<string, unknown>;
 type SettlementMode = "local-sqlite-control-plane" | "solana-rpc-control-plane";
-const staticRoot = resolve(fileURLToPath(new URL("../../public/", import.meta.url)));
+const staticRoot = resolve(
+  fileURLToPath(new URL("../../public/", import.meta.url)),
+);
 
 export type BackendServerOptions = {
   runtime?: AccuralRuntime;
@@ -20,20 +34,34 @@ export type BackendServerOptions = {
   solanaRpcUrl?: string;
 };
 
-export async function createBackendServer(options: BackendServerOptions = {}): Promise<Server> {
+export async function createBackendServer(
+  options: BackendServerOptions = {},
+): Promise<Server> {
   const runtime = options.runtime ?? new AccuralRuntime();
   await runtime.initialize();
-  const settlementMode = options.settlementMode ?? parseSettlementMode(process.env.ACCURAL_SETTLEMENT_MODE);
+  const settlementMode =
+    options.settlementMode ??
+    parseSettlementMode(process.env.ACCURAL_SETTLEMENT_MODE);
   const solanaClient =
     settlementMode === "solana-rpc-control-plane"
       ? new AccuralSolanaClient({
-          rpcUrl: options.solanaRpcUrl ?? process.env.ACCURAL_RPC_URL ?? "http://127.0.0.1:8899",
+          rpcUrl:
+            options.solanaRpcUrl ??
+            process.env.ACCURAL_RPC_URL ??
+            "http://127.0.0.1:8899",
         })
       : undefined;
 
   return createServer((request, response) => {
-    handleRequest(request, response, runtime, settlementMode, solanaClient).catch((error: unknown) => {
-      const message = error instanceof Error ? error.message : "Unknown backend error.";
+    handleRequest(
+      request,
+      response,
+      runtime,
+      settlementMode,
+      solanaClient,
+    ).catch((error: unknown) => {
+      const message =
+        error instanceof Error ? error.message : "Unknown backend error.";
       sendJson(response, 400, { error: message });
     });
   });
@@ -67,7 +95,11 @@ async function handleRequest(
   }
 
   if (method === "GET" && url.pathname === "/settlement/status") {
-    sendJson(response, 200, await settlementStatus(settlementMode, solanaClient));
+    sendJson(
+      response,
+      200,
+      await settlementStatus(settlementMode, solanaClient),
+    );
     return;
   }
 
@@ -103,9 +135,13 @@ async function handleRequest(
       owner,
       agentRegistry: agent.agentRegistry,
       policyVault: agent.policyVault,
-      maxPerTransaction: parseUsdcAmount(requiredString(body, "maxPerTransaction")),
+      maxPerTransaction: parseUsdcAmount(
+        requiredString(body, "maxPerTransaction"),
+      ),
       sessionBudget: parseUsdcAmount(requiredString(body, "sessionBudget")),
-      approvalRequiredAbove: parseUsdcAmount(requiredString(body, "approvalRequiredAbove")),
+      approvalRequiredAbove: parseUsdcAmount(
+        requiredString(body, "approvalRequiredAbove"),
+      ),
       allowedActions: optionalNumber(body, "allowedActions") ?? ACTION_ALL,
     });
     sendJson(response, 200, {
@@ -117,7 +153,10 @@ async function handleRequest(
     return;
   }
 
-  if (method === "POST" && url.pathname === "/solana/payment-intents/request-plan") {
+  if (
+    method === "POST" &&
+    url.pathname === "/solana/payment-intents/request-plan"
+  ) {
     const client = requireSolanaClient(solanaClient);
     const body = await readJsonObject(request);
     const owner = requiredPubkey(body, "ownerPubkey");
@@ -140,7 +179,10 @@ async function handleRequest(
     sendJson(response, 200, {
       settlementMode,
       signerPubkeys: [owner.toBase58()],
-      addresses: { ...presentAgentAddresses(agent), ...presentTaskAddresses(task) },
+      addresses: {
+        ...presentAgentAddresses(agent),
+        ...presentTaskAddresses(task),
+      },
       instruction: client.instructionPlan(instruction),
     });
     return;
@@ -162,8 +204,12 @@ async function handleRequest(
       beneficiary,
       mint,
     });
-    const escrowTokenAccount = optionalPubkey(body, "escrowTokenAccount") ?? tokenAccounts.escrowTokenAccount;
-    const payerTokenAccount = optionalPubkey(body, "payerTokenAccount") ?? tokenAccounts.payerTokenAccount;
+    const escrowTokenAccount =
+      optionalPubkey(body, "escrowTokenAccount") ??
+      tokenAccounts.escrowTokenAccount;
+    const payerTokenAccount =
+      optionalPubkey(body, "payerTokenAccount") ??
+      tokenAccounts.payerTokenAccount;
     const instruction = client.fundEscrowIx({
       owner,
       agentRegistry: agent.agentRegistry,
@@ -183,22 +229,31 @@ async function handleRequest(
     sendJson(response, 200, {
       settlementMode,
       signerPubkeys: [owner.toBase58()],
-      addresses: { ...presentAgentAddresses(agent), ...presentTaskAddresses(task) },
+      addresses: {
+        ...presentAgentAddresses(agent),
+        ...presentTaskAddresses(task),
+      },
       tokenAccounts: presentTokenAccounts({
         payerTokenAccount,
         escrowTokenAccount,
         beneficiaryTokenAccount: tokenAccounts.beneficiaryTokenAccount,
       }),
-      setupInstructions: tokenSetupPlans(client, owner, tokenAccounts, {
-        payerTokenAccount,
-        escrowTokenAccount,
-        beneficiaryTokenAccount: tokenAccounts.beneficiaryTokenAccount,
-      }, {
-        payerOwner: owner,
-        escrowOwner: task.escrowAccount,
-        beneficiaryOwner: beneficiary,
-        mint,
-      }),
+      setupInstructions: tokenSetupPlans(
+        client,
+        owner,
+        tokenAccounts,
+        {
+          payerTokenAccount,
+          escrowTokenAccount,
+          beneficiaryTokenAccount: tokenAccounts.beneficiaryTokenAccount,
+        },
+        {
+          payerOwner: owner,
+          escrowOwner: task.escrowAccount,
+          beneficiaryOwner: beneficiary,
+          mint,
+        },
+      ),
       instruction: client.instructionPlan(instruction),
       preconditions: [
         "If you pass custom token accounts, they must already be initialized for this mint and owner.",
@@ -220,23 +275,30 @@ async function handleRequest(
     const task = client.deriveTaskAddresses(agent.agentRegistry, taskId);
     const mint = optionalPubkey(body, "mint");
     const beneficiary = optionalPubkey(body, "beneficiaryPubkey");
-    const derivedTokenAccounts = mint && beneficiary
-      ? client.deriveTokenAccounts({
-          owner,
-          escrowAccount: task.escrowAccount,
-          beneficiary,
-          mint,
-        })
-      : undefined;
+    const derivedTokenAccounts =
+      mint && beneficiary
+        ? client.deriveTokenAccounts({
+            owner,
+            escrowAccount: task.escrowAccount,
+            beneficiary,
+            mint,
+          })
+        : undefined;
     const escrowTokenAccount =
-      optionalPubkey(body, "escrowTokenAccount") ?? derivedTokenAccounts?.escrowTokenAccount;
+      optionalPubkey(body, "escrowTokenAccount") ??
+      derivedTokenAccounts?.escrowTokenAccount;
     const beneficiaryTokenAccount =
-      optionalPubkey(body, "beneficiaryTokenAccount") ?? derivedTokenAccounts?.beneficiaryTokenAccount;
+      optionalPubkey(body, "beneficiaryTokenAccount") ??
+      derivedTokenAccounts?.beneficiaryTokenAccount;
     if (!escrowTokenAccount) {
-      throw new Error("escrowTokenAccount is required unless mint and beneficiaryPubkey are provided.");
+      throw new Error(
+        "escrowTokenAccount is required unless mint and beneficiaryPubkey are provided.",
+      );
     }
     if (!beneficiaryTokenAccount) {
-      throw new Error("beneficiaryTokenAccount is required unless mint and beneficiaryPubkey are provided.");
+      throw new Error(
+        "beneficiaryTokenAccount is required unless mint and beneficiaryPubkey are provided.",
+      );
     }
     const instruction = client.releaseEscrowIx({
       verifier,
@@ -254,7 +316,10 @@ async function handleRequest(
     sendJson(response, 200, {
       settlementMode,
       signerPubkeys: [verifier.toBase58()],
-      addresses: { ...presentAgentAddresses(agent), ...presentTaskAddresses(task) },
+      addresses: {
+        ...presentAgentAddresses(agent),
+        ...presentTaskAddresses(task),
+      },
       tokenAccounts: presentTokenAccounts({
         payerTokenAccount: derivedTokenAccounts?.payerTokenAccount,
         escrowTokenAccount,
@@ -275,13 +340,23 @@ async function handleRequest(
     return;
   }
 
-  if (method === "GET" && parts.length === 3 && parts[0] === "agents" && parts[2] === "balance") {
+  if (
+    method === "GET" &&
+    parts.length === 3 &&
+    parts[0] === "agents" &&
+    parts[2] === "balance"
+  ) {
     const result = await runtime.getBalance({ agentId: parts[1]! });
     sendJson(response, 200, result);
     return;
   }
 
-  if (method === "GET" && parts.length === 3 && parts[0] === "agents" && parts[2] === "reputation") {
+  if (
+    method === "GET" &&
+    parts.length === 3 &&
+    parts[0] === "agents" &&
+    parts[2] === "reputation"
+  ) {
     const result = await runtime.getReputation(parts[1]!);
     sendJson(response, 200, result);
     return;
@@ -331,7 +406,12 @@ async function handleRequest(
     return;
   }
 
-  if (method === "POST" && parts.length === 3 && parts[0] === "escrows" && parts[2] === "release") {
+  if (
+    method === "POST" &&
+    parts.length === 3 &&
+    parts[0] === "escrows" &&
+    parts[2] === "release"
+  ) {
     const body = await readJsonObject(request);
     const result = await runtime.releaseEscrow({
       taskId: parts[1]!,
@@ -445,7 +525,11 @@ async function handleRequest(
   });
 }
 
-async function tryServeStatic(request: IncomingMessage, response: ServerResponse, url: URL) {
+async function tryServeStatic(
+  request: IncomingMessage,
+  response: ServerResponse,
+  url: URL,
+) {
   if (request.method !== "GET") {
     return false;
   }
@@ -519,7 +603,8 @@ async function settlementStatus(
   }
 
   try {
-    const blockhash = await solanaClient.connection.getLatestBlockhash("confirmed");
+    const blockhash =
+      await solanaClient.connection.getLatestBlockhash("confirmed");
     const deployment = await solanaClient.getProgramDeploymentStatus();
     return {
       settlementMode,
@@ -561,12 +646,16 @@ function parseSettlementMode(value: string | undefined): SettlementMode {
 
 function requireSolanaClient(solanaClient: AccuralSolanaClient | undefined) {
   if (!solanaClient) {
-    throw new Error("Solana settlement mode is required for this route. Set ACCURAL_SETTLEMENT_MODE=solana.");
+    throw new Error(
+      "Solana settlement mode is required for this route. Set ACCURAL_SETTLEMENT_MODE=solana.",
+    );
   }
   return solanaClient;
 }
 
-function presentAgentAddresses(addresses: ReturnType<AccuralSolanaClient["deriveAgentAddresses"]>) {
+function presentAgentAddresses(
+  addresses: ReturnType<AccuralSolanaClient["deriveAgentAddresses"]>,
+) {
   return {
     agentRegistry: addresses.agentRegistry.toBase58(),
     policyVault: addresses.policyVault.toBase58(),
@@ -574,7 +663,9 @@ function presentAgentAddresses(addresses: ReturnType<AccuralSolanaClient["derive
   };
 }
 
-function presentTaskAddresses(addresses: ReturnType<AccuralSolanaClient["deriveTaskAddresses"]>) {
+function presentTaskAddresses(
+  addresses: ReturnType<AccuralSolanaClient["deriveTaskAddresses"]>,
+) {
   return {
     paymentIntent: addresses.paymentIntent.toBase58(),
     escrowAccount: addresses.escrowAccount.toBase58(),
@@ -635,7 +726,9 @@ function tokenSetupPlans(
           ),
         }
       : {}),
-    ...(selected.beneficiaryTokenAccount.equals(canonical.beneficiaryTokenAccount)
+    ...(selected.beneficiaryTokenAccount.equals(
+      canonical.beneficiaryTokenAccount,
+    )
       ? {
           setupBeneficiaryTokenAccount: signedInstructionPlan(
             client,
@@ -663,7 +756,11 @@ function signedInstructionPlan(
   };
 }
 
-function sendJson(response: ServerResponse, statusCode: number, payload: unknown) {
+function sendJson(
+  response: ServerResponse,
+  statusCode: number,
+  payload: unknown,
+) {
   response.statusCode = statusCode;
   response.setHeader("Content-Type", "application/json; charset=utf-8");
   response.setHeader("Access-Control-Allow-Origin", "*");
@@ -750,8 +847,13 @@ function optionalStringArray(body: JsonObject, key: string) {
   if (value === undefined || value === null) {
     return undefined;
   }
-  if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || !item.trim())) {
-    throw new Error(`${key} must be an array of non-empty strings when provided.`);
+  if (
+    !Array.isArray(value) ||
+    value.some((item) => typeof item !== "string" || !item.trim())
+  ) {
+    throw new Error(
+      `${key} must be an array of non-empty strings when provided.`,
+    );
   }
   return value.map((item) => item.trim());
 }
@@ -834,14 +936,20 @@ function parseAgentMode(value: string): AgentMode {
 }
 
 async function main() {
-  const port = Number.parseInt(process.env.ACCURAL_BACKEND_PORT ?? "8787", 10);
-  const host = process.env.ACCURAL_BACKEND_HOST ?? "127.0.0.1";
+  const port = Number.parseInt(
+    process.env.PORT ?? process.env.ACCURAL_BACKEND_PORT ?? "8787",
+    10,
+  );
+  const host = process.env.ACCURAL_BACKEND_HOST ?? "0.0.0.0";
   const server = await createBackendServer();
   server.listen(port, host, () => {
     console.log(`Accural backend listening on http://${host}:${port}`);
   });
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (
+  process.argv[1] &&
+  resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+) {
   await main();
 }
