@@ -94,6 +94,7 @@ npm.cmd run backend:start
 ```
 
 By default it listens on `http://127.0.0.1:8787`. Override with `ACCURAL_BACKEND_HOST` and `ACCURAL_BACKEND_PORT`.
+The same server also serves the local operator console at `http://127.0.0.1:8787/`.
 
 Implemented routes:
 

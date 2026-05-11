@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Accural Console</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <aside class="sidebar" aria-label="Console navigation">
+        <div class="brand-block">
+          <div class="brand-mark" aria-hidden="true">A</div>
+          <div>
+            <p class="eyebrow">Accural</p>
+            <h1>Agent money console</h1>
+          </div>
+        </div>
+
+        <nav class="nav-list">
+          <a href="#overview">Overview</a>
+          <a href="#agent">Agent setup</a>
+          <a href="#flow">Escrow flow</a>
+          <a href="#agent-run">Agent run</a>
+          <a href="#reconciliation">Reconciliation</a>
+        </nav>
+
+        <section class="status-panel" aria-live="polite">
+          <div class="status-row">
+            <span class="status-dot" id="healthDot"></span>
+            <span id="healthLabel">Checking backend</span>
+          </div>
+          <p id="settlementMode">Settlement mode pending</p>
+          <button class="button secondary full" id="refreshStatus" type="button">Refresh status</button>
+        </section>
+      </aside>
+
+      <section class="workspace">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">Local service boundary</p>
+            <h2>Coordinate policy, intent, escrow, and proof</h2>
+          </div>
+          <div class="mode-pill" id="boundaryLabel">Loading boundary</div>
+        </header>
+
+        <section class="metrics-grid" id="overview">
+          <article class="metric">
+            <span>Available budget</span>
+            <strong id="availableBudget">--</strong>
+          </article>
+          <article class="metric">
+            <span>Active escrow</span>
+            <strong id="activeEscrow">--</strong>
+          </article>
+          <article class="metric">
+            <span>Released spend</span>
+            <strong id="releasedSpend">--</strong>
+          </article>
+          <article class="metric">
+            <span>Latest task</span>
+            <strong id="latestTask">none</strong>
+          </article>
+        </section>
+
+        <section class="panel-grid">
+          <article class="panel" id="agent">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Step 1</p>
+                <h3>Agent setup</h3>
+              </div>
+              <span class="panel-tag">Policy vault</span>
+            </div>
+
+            <form class="form-grid" id="agentForm">
+              <label>
+                Agent ID
+                <input name="agentId" value="campaign-coordinator" autocomplete="off" />
+              </label>
+              <label>
+                Session budget
+                <input name="sessionBudget" value="30" inputmode="decimal" />
+              </label>
+              <label>
+                Max transaction
+                <input name="maxPerTransaction" value="15" inputmode="decimal" />
+              </label>
+              <label>
+                Approval above
+                <input name="approvalRequiredAbove" value="15" inputmode="decimal" />
+              </label>
+              <div class="action-row">
+                <button class="button primary" type="submit">Create agent and policy</button>
+                <button class="button secondary" id="loadBalance" type="button">Load balance</button>
+              </div>
+            </form>
+          </article>
+
+          <article class="panel" id="flow">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Step 2</p>
+                <h3>Payment intent to escrow</h3>
+              </div>
+              <span class="panel-tag">Local USDC</span>
+            </div>
+
+            <form class="form-grid" id="flowForm">
+              <label>
+                Task ID
+                <input name="taskId" value="launch-artifact" autocomplete="off" />
+              </label>
+              <label>
+                Amount
+                <input name="amount" value="10" inputmode="decimal" />
+              </label>
+              <label class="wide">
+                Recipient pubkey
+                <input name="beneficiaryPubkey" value="11111111111111111111111111111112" autocomplete="off" />
+              </label>
+              <label class="wide">
+                Verifier pubkey
+                <input name="verifierPubkey" value="11111111111111111111111111111113" autocomplete="off" />
+              </label>
+              <label class="wide">
+                Purpose
+                <input name="purpose" value="Produce verified campaign research artifact" />
+              </label>
+              <label class="wide">
+                Proof URI
+                <input name="proofUri" value="ipfs://proof/launch-artifact" />
+              </label>
+              <label class="checkbox-line wide">
+                <input name="humanApproved" type="checkbox" />
+                Human approval attached
+              </label>
+              <div class="action-row wide">
+                <button class="button primary" id="runFlow" type="submit">Request, fund, release</button>
+                <button class="button secondary" id="requestIntent" type="button">Only request intent</button>
+              </div>
+            </form>
+          </article>
+        </section>
+
+        <section class="panel-grid">
+          <article class="panel" id="agent-run">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Agent orchestration</p>
+                <h3>Run deterministic demo</h3>
+              </div>
+              <span class="panel-tag">No API key</span>
+            </div>
+            <form class="form-grid" id="demoForm">
+              <label class="wide">
+                Goal
+                <input name="goal" value="Ship a verified growth campaign artifact." />
+              </label>
+              <label>
+                Budget
+                <input name="budget" value="30" inputmode="decimal" />
+              </label>
+              <label>
+                Task ID
+                <input name="taskId" value="agent-console-run" autocomplete="off" />
+              </label>
+              <div class="action-row wide">
+                <button class="button primary" type="submit">Run agents</button>
+              </div>
+            </form>
+          </article>
+
+          <article class="panel" id="reconciliation">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Audit memory</p>
+                <h3>Reconciliation</h3>
+              </div>
+              <span class="panel-tag" id="recordCount">0 records</span>
+            </div>
+            <div class="action-row compact">
+              <input id="reconcileTaskId" placeholder="Filter by task ID" />
+              <button class="button secondary" id="loadReconciliation" type="button">Load</button>
+            </div>
+            <div class="record-list" id="recordList" aria-live="polite"></div>
+          </article>
+        </section>
+
+        <section class="console-panel" aria-live="polite">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">Response</p>
+              <h3>Protocol output</h3>
+            </div>
+            <button class="button secondary" id="clearLog" type="button">Clear</button>
+          </div>
+          <pre id="outputLog">Ready.</pre>
+        </section>
+      </section>
+    </main>
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>
