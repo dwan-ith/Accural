@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { resolve } from "node:path";
+import { extname, relative, resolve } from "node:path";
+import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import { PublicKey } from "@solana/web3.js";
@@ -11,6 +12,7 @@ import type { AgentMode, CampaignGoal } from "../agents/types.js";
 
 type JsonObject = Record<string, unknown>;
 type SettlementMode = "local-sqlite-control-plane" | "solana-rpc-control-plane";
+const staticRoot = resolve(fileURLToPath(new URL("../../public/", import.meta.url)));
 
 export type BackendServerOptions = {
   runtime?: AccuralRuntime;
@@ -414,6 +416,10 @@ async function handleRequest(
     return;
   }
 
+  if (await tryServeStatic(request, response, url)) {
+    return;
+  }
+
   sendJson(response, 404, {
     error: "Route not found.",
     routes: [
@@ -437,6 +443,57 @@ async function handleRequest(
       "POST /solana/escrows/release-plan",
     ],
   });
+}
+
+async function tryServeStatic(request: IncomingMessage, response: ServerResponse, url: URL) {
+  if (request.method !== "GET") {
+    return false;
+  }
+
+  const pathname = decodeURIComponent(url.pathname);
+  const requestedFile = pathname === "/" ? "index.html" : pathname.slice(1);
+  const resolvedFile = resolve(staticRoot, requestedFile);
+  if (relative(staticRoot, resolvedFile).startsWith("..")) {
+    return false;
+  }
+
+  try {
+    const content = await readFile(resolvedFile);
+    response.statusCode = 200;
+    response.setHeader("Content-Type", contentType(resolvedFile));
+    response.setHeader("Cache-Control", "no-store");
+    response.end(content);
+    return true;
+  } catch {
+    if (!extname(pathname)) {
+      try {
+        const content = await readFile(resolve(staticRoot, "index.html"));
+        response.statusCode = 200;
+        response.setHeader("Content-Type", "text/html; charset=utf-8");
+        response.setHeader("Cache-Control", "no-store");
+        response.end(content);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+    return false;
+  }
+}
+
+function contentType(filePath: string) {
+  switch (extname(filePath)) {
+    case ".css":
+      return "text/css; charset=utf-8";
+    case ".js":
+      return "text/javascript; charset=utf-8";
+    case ".svg":
+      return "image/svg+xml";
+    case ".json":
+      return "application/json; charset=utf-8";
+    default:
+      return "text/html; charset=utf-8";
+  }
 }
 
 async function settlementStatus(

@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Accural Console | Agent Money</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <header class="app-header">
+      <div class="brand-block">
+        <div class="brand-mark" aria-hidden="true">A</div>
+        <div class="brand-text">
+          <p class="eyebrow">Accural Protocol</p>
+          <h1>Agent Console</h1>
+        </div>
+      </div>
+
+      <nav class="top-nav" id="mainNav">
+        <a href="#overview" class="active"
+          ><i data-lucide="layout-dashboard"></i> Overview</a
+        >
+        <a href="#agent"><i data-lucide="user-plus"></i> Agent Setup</a>
+        <a href="#flow"><i data-lucide="arrow-right-left"></i> Payment Flow</a>
+        <a href="#agent-run"><i data-lucide="play-circle"></i> Orchestration</a>
+        <a href="#reconciliation"
+          ><i data-lucide="history"></i> Reconciliation</a
+        >
+      </nav>
+    </header>
+
+    <main class="workspace">
+      <header class="page-intro">
+        <div class="top-bar-info">
+          <div>
+            <p class="eyebrow">Local service boundary</p>
+            <h2>Coordinate policy, intent, escrow, and proof</h2>
+          </div>
+          <div class="mode-pill" id="boundaryLabel">Locating boundary...</div>
+        </div>
+      </header>
+
+      <section class="metrics-grid" id="overview">
+        <article class="metric">
+          <div>
+            <span>Available Budget</span>
+            <i data-lucide="wallet"></i>
+          </div>
+          <strong id="availableBudget">0.00 USDC</strong>
+        </article>
+        <article class="metric">
+          <div>
+            <span>Active Escrow</span>
+            <i data-lucide="lock"></i>
+          </div>
+          <strong id="activeEscrow">0.00 USDC</strong>
+        </article>
+        <article class="metric">
+          <div>
+            <span>Released Spend</span>
+            <i data-lucide="send"></i>
+          </div>
+          <strong id="releasedSpend">0.00 USDC</strong>
+        </article>
+        <article class="metric">
+          <div>
+            <span>Latest Task</span>
+            <i data-lucide="check-circle"></i>
+          </div>
+          <strong id="latestTask">none</strong>
+        </article>
+      </section>
+
+      <section class="panel-grid">
+        <article class="panel" id="agent">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">Step 1</p>
+              <h3>Agent Setup</h3>
+            </div>
+            <span class="panel-tag">Policy Vault</span>
+          </div>
+
+          <form class="form-grid" id="agentForm">
+            <label>
+              Agent ID
+              <input name="agentId" placeholder="campaign-coordinator" />
+            </label>
+            <label>
+              Session Budget (USDC)
+              <input
+                name="sessionBudget"
+                placeholder="30"
+                type="number"
+                step="0.01"
+              />
+            </label>
+            <label>
+              Max Transaction
+              <input
+                name="maxPerTransaction"
+                placeholder="15"
+                type="number"
+                step="0.01"
+              />
+            </label>
+            <label>
+              Approval Required Above
+              <input
+                name="approvalRequiredAbove"
+                placeholder="15"
+                type="number"
+                step="0.01"
+              />
+            </label>
+            <div class="action-row wide">
+              <button class="button primary" type="submit">
+                Initialize Policy
+              </button>
+              <button class="button secondary" id="loadBalance" type="button">
+                Sync Balance
+              </button>
+            </div>
+          </form>
+        </article>
+
+        <article class="panel" id="flow">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">Step 2</p>
+              <h3>Payment Pipeline</h3>
+            </div>
+            <span class="panel-tag">USDC Escrow</span>
+          </div>
+
+          <form class="form-grid" id="flowForm">
+            <label>
+              Task Reference
+              <input
+                name="taskId"
+                placeholder="launch-artifact"
+                autocomplete="off"
+              />
+            </label>
+            <label>
+              Amount (USDC)
+              <input name="amount" placeholder="10" type="number" step="0.01" />
+            </label>
+            <label class="wide">
+              Beneficiary Address
+              <input
+                name="beneficiaryPubkey"
+                placeholder="11111111111111111111111111111112"
+              />
+            </label>
+            <label class="wide">
+              Verifier Address
+              <input
+                name="verifierPubkey"
+                placeholder="11111111111111111111111111111113"
+              />
+            </label>
+            <label class="wide">
+              Purpose / Memo
+              <input
+                name="purpose"
+                placeholder="Produce verified campaign research artifact"
+              />
+            </label>
+            <label class="wide">
+              Proof URI (IPFS/Arweave)
+              <input
+                name="proofUri"
+                placeholder="ipfs://proof/launch-artifact"
+              />
+            </label>
+            <label class="checkbox-line wide">
+              <input name="humanApproved" type="checkbox" />
+              Human approval attached
+            </label>
+            <div class="action-row wide">
+              <button class="button primary" id="runFlow" type="submit">
+                Execute Flow
+              </button>
+              <button class="button secondary" id="requestIntent" type="button">
+                Only Intent
+              </button>
+            </div>
+          </form>
+        </article>
+      </section>
+
+      <section class="panel-grid">
+        <article class="panel" id="agent-run">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">Agent Orchestration</p>
+              <h3>Orchestration Engine</h3>
+            </div>
+            <span class="panel-tag">Sandbox</span>
+          </div>
+          <form class="form-grid" id="demoForm">
+            <label class="wide">
+              Autonomous Goal
+              <input
+                name="goal"
+                placeholder="Ship a verified growth campaign artifact."
+              />
+            </label>
+            <label>
+              Budget
+              <input name="budget" placeholder="30" type="number" step="0.01" />
+            </label>
+            <label>
+              Simulation ID
+              <input name="taskId" placeholder="agent-console-run" />
+            </label>
+            <div class="action-row wide">
+              <button class="button primary" type="submit">
+                Launch Agents
+              </button>
+            </div>
+          </form>
+        </article>
+
+        <article class="panel" id="reconciliation">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">Audit Trial</p>
+              <h3>Reconciliation</h3>
+            </div>
+            <span class="panel-tag" id="recordCount">0 records</span>
+          </div>
+          <div class="action-row" style="margin-bottom: 20px">
+            <input
+              id="reconcileTaskId"
+              placeholder="Filter by Task ID..."
+              style="flex: 1"
+            />
+            <button
+              class="button secondary"
+              id="loadReconciliation"
+              type="button"
+            >
+              <i data-lucide="search"></i>
+            </button>
+          </div>
+          <div class="record-list" id="recordList">
+            <div class="empty-state">No audit records found.</div>
+          </div>
+        </article>
+      </section>
+
+      <section class="console-panel">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">Network Output</p>
+            <h3>Protocol Logs</h3>
+          </div>
+          <button class="button secondary" id="clearLog" type="button">
+            <i data-lucide="trash-2"></i> Clear
+          </button>
+        </div>
+        <pre id="outputLog">System initialized. Waiting for actions...</pre>
+      </section>
+    </main>
+
+    <footer class="status-bar">
+      <div class="status-info">
+        <div class="status-row">
+          <span class="status-dot" id="healthDot"></span>
+          <span id="healthLabel">Checking Backend...</span>
+        </div>
+        <span id="settlementMode">Initializing Protocol...</span>
+      </div>
+      <button class="button secondary" id="refreshStatus" type="button">
+        <i data-lucide="refresh-cw"></i> Refresh Status
+      </button>
+    </footer>
+
+    <script src="/app.js" type="module"></script>
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        if (window.lucide) {
+          lucide.createIcons();
+        }
+      });
+    </script>
+  </body>
+</html>
