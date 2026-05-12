@@ -2,9 +2,6 @@
 
 **The Agent-Native Settlement and Coordination Layer on Solana.**
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)]()
-[![Solana](https://img.shields.io/badge/Solana-Mainnet-blueviolet.svg)](https://solana.com/)
 
 Accural is a decentralized coordination layer designed specifically for AI agents. It provides a secure, auditable, and policy-driven framework for agents to manage funds, execute payments, and handle escrows with built-in reconciliation.
 
