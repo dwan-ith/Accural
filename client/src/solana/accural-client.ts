@@ -15,6 +15,7 @@ import {
   createAssociatedTokenAccountIdempotentInstruction,
   getAssociatedTokenAddressSync,
 } from "@solana/spl-token";
+import { solanaRpcUrl } from "../config.js";
 import { canonicalJson } from "../money.js";
 
 export const ACCURAL_PROGRAM_ID = new PublicKey("HTVTUMeyRkpbakNASCQ44MzgjxKjrV5oG8rBSavMiPCS");
@@ -56,6 +57,11 @@ export type TokenAccountAddresses = {
   payerTokenAccount: PublicKey;
   escrowTokenAccount: PublicKey;
   beneficiaryTokenAccount: PublicKey;
+};
+
+export type DirectPaymentTokenAccountAddresses = {
+  payerTokenAccount: PublicKey;
+  recipientTokenAccount: PublicKey;
 };
 
 export type DecodedPolicy = {
@@ -144,7 +150,7 @@ export class AccuralSolanaClient {
   readonly programId: PublicKey;
 
   constructor(input: { rpcUrl?: string; connection?: Connection; programId?: PublicKey } = {}) {
-    this.connection = input.connection ?? new Connection(input.rpcUrl ?? "http://127.0.0.1:8899", "confirmed");
+    this.connection = input.connection ?? new Connection(solanaRpcUrl(input.rpcUrl), "confirmed");
     this.programId = input.programId ?? ACCURAL_PROGRAM_ID;
   }
 
@@ -253,6 +259,17 @@ export class AccuralSolanaClient {
       meta(input.agentReputation, false, true),
       meta(SystemProgram.programId, false, false),
     ]);
+  }
+
+  deriveDirectPaymentTokenAccounts(input: {
+    owner: PublicKey;
+    recipient: PublicKey;
+    mint: PublicKey;
+  }): DirectPaymentTokenAccountAddresses {
+    return {
+      payerTokenAccount: getAssociatedTokenAddressSync(input.mint, input.owner),
+      recipientTokenAccount: getAssociatedTokenAddressSync(input.mint, input.recipient),
+    };
   }
 
   setPolicyIx(input: {

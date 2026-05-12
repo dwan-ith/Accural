@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { Keypair } from "@solana/web3.js";
+import { parseBooleanEnv, solanaRpcUrl } from "./config.js";
 import { AccuralSolanaClient, type TransactionBundlePlan } from "./solana/accural-client.js";
 import {
   assertValidTransactionBundlePlan,
@@ -10,7 +11,7 @@ import {
 const planPath = requiredEnv("ACCURAL_BUNDLE_PLAN_PATH");
 const ownerKeypairPath = requiredEnv("ACCURAL_OWNER_KEYPAIR");
 const verifierKeypairPath = process.env.ACCURAL_VERIFIER_KEYPAIR;
-const rpcUrl = process.env.ACCURAL_RPC_URL ?? "http://127.0.0.1:8899";
+const rpcUrl = solanaRpcUrl();
 const simulateBeforeSend = parseBooleanEnv(process.env.ACCURAL_SIMULATE_BEFORE_SEND, true);
 
 const bundle = JSON.parse(readFileSync(planPath, "utf8")) as TransactionBundlePlan;
@@ -60,19 +61,6 @@ function requiredEnv(name: string) {
     throw new Error(`${name} is required.`);
   }
   return value.trim();
-}
-
-function parseBooleanEnv(value: string | undefined, fallback: boolean) {
-  if (value === undefined || value === null || !value.trim()) {
-    return fallback;
-  }
-  if (value === "1" || value.toLowerCase() === "true") {
-    return true;
-  }
-  if (value === "0" || value.toLowerCase() === "false") {
-    return false;
-  }
-  throw new Error("ACCURAL_SIMULATE_BEFORE_SEND must be true/false or 1/0.");
 }
 
 function loadKeypair(path: string) {

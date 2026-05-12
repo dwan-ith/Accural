@@ -4,7 +4,8 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { Keypair } from "@solana/web3.js";
+import { Keypair, SystemProgram, TransactionInstruction } from "@solana/web3.js";
+import { AccuralSolanaClient } from "../solana/accural-client.js";
 
 process.env.ACCURAL_DB_PATH = join(mkdtempSync(join(tmpdir(), "accural-backend-")), "test.db");
 
@@ -48,6 +49,26 @@ async function requestJson<T>(baseUrl: string, path: string, init?: RequestInit)
   }
   return payload as T;
 }
+
+test("defaults the backend boundary to Solana planning instead of local SQLite settlement", async () => {
+  await withBackend(async (baseUrl) => {
+    const health = await requestJson<{
+      settlementMode: string;
+      settlementBoundary: string;
+    }>(baseUrl, "/health");
+
+    assert.equal(health.settlementMode, "solana-rpc-control-plane");
+    assert.match(health.settlementBoundary, /Solana RPC/);
+    await assert.rejects(
+      () =>
+        requestJson(baseUrl, "/agents", {
+          method: "POST",
+          body: JSON.stringify({ agentId: "local-only" }),
+        }),
+      /local SQLite control plane/,
+    );
+  });
+});
 
 test("serves the policy, escrow, release, and reconciliation backend API over HTTP", async () => {
   await withBackend(async (baseUrl) => {
@@ -149,7 +170,7 @@ test("serves the policy, escrow, release, and reconciliation backend API over HT
     assert.equal(balance.availableBudget, "20");
     assert.equal(balance.activeEscrow, "0");
     assert.equal(balance.releasedSpend, "10");
-  });
+  }, { settlementMode: "local-sqlite-control-plane" });
 });
 
 test("runs the deterministic agent backend endpoint without requiring an LLM key", async () => {
@@ -174,7 +195,7 @@ test("runs the deterministic agent backend endpoint without requiring an LLM key
       result.accural.reconciliation.map((record) => record.eventType),
       ["ESCROW_FUNDED", "ESCROW_RELEASED"],
     );
-  });
+  }, { settlementMode: "local-sqlite-control-plane" });
 });
 
 test("serves Solana instruction plans in explicit solana settlement mode", async () => {
@@ -282,6 +303,52 @@ test("serves Solana instruction plans in explicit solana settlement mode", async
       assert.equal(release.instruction.keys[0]?.pubkey, verifierPubkey);
       assert.equal(release.instruction.keys[0]?.isSigner, true);
 
+      const service = await requestJson<{
+        signerPubkeys: string[];
+        addresses: { serviceListing: string };
+        instruction: { keys: Array<{ pubkey: string }> };
+      }>(baseUrl, "/solana/services/register-plan", {
+        method: "POST",
+        body: JSON.stringify({
+          ownerPubkey,
+          agentId: "api-agent",
+          serviceType: "research",
+          description: "Backend planned research service",
+          price: "2",
+          mint,
+        }),
+      });
+      assert.deepEqual(service.signerPubkeys, [ownerPubkey]);
+      assert.equal(service.instruction.keys[2]?.pubkey, service.addresses.serviceListing);
+
+      const directPayment = await requestJson<{
+        signerPubkeys: string[];
+        addresses: { reconciliationRecord: string };
+        tokenAccounts: { payerTokenAccount: string; recipientTokenAccount: string };
+        setupInstructions: {
+          setupRecipientTokenAccount: { signerPubkeys: string[]; instruction: { keys: Array<{ pubkey: string }> } };
+        };
+        reconciliationHashHex: string;
+        instruction: { keys: Array<{ pubkey: string }> };
+      }>(baseUrl, "/solana/direct-payments/plan", {
+        method: "POST",
+        body: JSON.stringify({
+          ownerPubkey,
+          agentId: "api-agent",
+          taskId: "api-direct",
+          amount: "2",
+          purpose: "Backend planned direct payment",
+          proofUri: "ipfs://proof/api-direct",
+          mint,
+          recipientPubkey: beneficiaryPubkey,
+        }),
+      });
+      assert.deepEqual(directPayment.signerPubkeys, [ownerPubkey]);
+      assert.match(directPayment.reconciliationHashHex, /^[0-9a-f]{64}$/);
+      assert.equal(directPayment.instruction.keys[3]?.pubkey, directPayment.addresses.reconciliationRecord);
+      assert.equal(directPayment.instruction.keys[5]?.pubkey, directPayment.tokenAccounts.recipientTokenAccount);
+      assert.deepEqual(directPayment.setupInstructions.setupRecipientTokenAccount.signerPubkeys, [ownerPubkey]);
+
       const agentRun = await requestJson<{
         settlementMode: string;
         solana: {
@@ -331,6 +398,58 @@ test("serves Solana instruction plans in explicit solana settlement mode", async
         agentRun.solana.addresses.reconciliationRecord,
       );
       assert.match(agentRun.solana.addresses.agentReputation, /^[1-9A-HJ-NP-Za-km-z]{32,44}$/);
+
+      const priorOwnerKeypair = process.env.ACCURAL_OWNER_KEYPAIR;
+      const priorVerifierKeypair = process.env.ACCURAL_VERIFIER_KEYPAIR;
+      const priorExtraKeypairs = process.env.ACCURAL_EXTRA_SIGNER_KEYPAIRS;
+      delete process.env.ACCURAL_OWNER_KEYPAIR;
+      delete process.env.ACCURAL_VERIFIER_KEYPAIR;
+      delete process.env.ACCURAL_EXTRA_SIGNER_KEYPAIRS;
+      try {
+        const client = new AccuralSolanaClient();
+        const signer = Keypair.generate().publicKey;
+        const bundle = client.transactionBundlePlan({
+          bundleId: "backend-execute-missing-signer",
+          phases: [
+            {
+              phase: "submit",
+              description: "Backend should refuse execution without configured signer files.",
+              signerPubkeys: [signer.toBase58()],
+              instructions: [
+                new TransactionInstruction({
+                  programId: SystemProgram.programId,
+                  data: Buffer.from([1]),
+                  keys: [{ pubkey: signer, isSigner: true, isWritable: true }],
+                }),
+              ],
+            },
+          ],
+        });
+        await assert.rejects(
+          () =>
+            requestJson(baseUrl, "/solana/bundles/execute", {
+              method: "POST",
+              body: JSON.stringify({ bundle, simulateBeforeSend: false }),
+            }),
+          /missing/i,
+        );
+      } finally {
+        if (priorOwnerKeypair === undefined) {
+          delete process.env.ACCURAL_OWNER_KEYPAIR;
+        } else {
+          process.env.ACCURAL_OWNER_KEYPAIR = priorOwnerKeypair;
+        }
+        if (priorVerifierKeypair === undefined) {
+          delete process.env.ACCURAL_VERIFIER_KEYPAIR;
+        } else {
+          process.env.ACCURAL_VERIFIER_KEYPAIR = priorVerifierKeypair;
+        }
+        if (priorExtraKeypairs === undefined) {
+          delete process.env.ACCURAL_EXTRA_SIGNER_KEYPAIRS;
+        } else {
+          process.env.ACCURAL_EXTRA_SIGNER_KEYPAIRS = priorExtraKeypairs;
+        }
+      }
     },
     { settlementMode: "solana-rpc-control-plane", solanaRpcUrl: "http://127.0.0.1:8899" },
   );

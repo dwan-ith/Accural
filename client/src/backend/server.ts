@@ -1,16 +1,17 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createHash } from "node:crypto";
-import { PublicKey } from "@solana/web3.js";
+import { readFileSync } from "node:fs";
+import { Keypair, PublicKey } from "@solana/web3.js";
+import { parseBooleanEnv, parseSettlementMode, solanaRpcUrl, type SettlementMode } from "../config.js";
 import { AccuralRuntime, type CreateEscrowInput, type DirectPaymentInput, type ReleaseEscrowInput, type RequestPaymentInput, type SetPolicyInput } from "../protocol.js";
 import { runAgentDemo, runAgentSolanaPlan } from "../agents/run.js";
 import { parseUsdcAmount } from "../money.js";
-import { ACTION_ALL, AccuralSolanaClient } from "../solana/accural-client.js";
+import { ACTION_ALL, AccuralSolanaClient, semanticReconciliationHash, type TransactionBundlePlan } from "../solana/accural-client.js";
+import { bundlePlanHash, executeTransactionBundle, validateTransactionBundlePlan } from "../solana/execute-bundle.js";
 import type { AgentMode, CampaignGoal } from "../agents/types.js";
 
 type JsonObject = Record<string, unknown>;
-type SettlementMode = "local-sqlite-control-plane" | "solana-rpc-control-plane";
 
 export type BackendServerOptions = {
   runtime?: AccuralRuntime;
@@ -19,13 +20,15 @@ export type BackendServerOptions = {
 };
 
 export async function createBackendServer(options: BackendServerOptions = {}): Promise<Server> {
-  const runtime = options.runtime ?? new AccuralRuntime();
-  await runtime.initialize();
   const settlementMode = options.settlementMode ?? parseSettlementMode(process.env.ACCURAL_SETTLEMENT_MODE);
+  const runtime = options.runtime ?? (settlementMode === "local-sqlite-control-plane" ? new AccuralRuntime() : undefined);
+  if (runtime) {
+    await runtime.initialize();
+  }
   const solanaClient =
     settlementMode === "solana-rpc-control-plane"
       ? new AccuralSolanaClient({
-          rpcUrl: options.solanaRpcUrl ?? process.env.ACCURAL_RPC_URL ?? "http://127.0.0.1:8899",
+          rpcUrl: solanaRpcUrl(options.solanaRpcUrl),
         })
       : undefined;
 
@@ -40,7 +43,7 @@ export async function createBackendServer(options: BackendServerOptions = {}): P
 async function handleRequest(
   request: IncomingMessage,
   response: ServerResponse,
-  runtime: AccuralRuntime,
+  runtime: AccuralRuntime | undefined,
   settlementMode: SettlementMode,
   solanaClient: AccuralSolanaClient | undefined,
 ) {
@@ -263,9 +266,156 @@ async function handleRequest(
     return;
   }
 
-  if (method === "POST" && url.pathname === "/agents") {
+  if (method === "POST" && url.pathname === "/solana/services/register-plan") {
+    const client = requireSolanaClient(solanaClient);
     const body = await readJsonObject(request);
-    const result = await runtime.createAgentWallet({
+    const owner = requiredPubkey(body, "ownerPubkey");
+    const agentId = requiredString(body, "agentId");
+    const serviceType = requiredString(body, "serviceType");
+    const agent = client.deriveAgentAddresses(owner, agentId);
+    const service = client.deriveServiceAddresses(agent.agentRegistry, serviceType);
+    const instruction = client.registerServiceIx({
+      owner,
+      agentRegistry: agent.agentRegistry,
+      serviceListing: service.serviceListing,
+      mint: requiredPubkey(body, "mint"),
+      serviceType,
+      description: requiredString(body, "description"),
+      priceMinor: parseUsdcAmount(requiredString(body, "price")),
+    });
+    sendJson(response, 200, {
+      settlementMode,
+      signerPubkeys: [owner.toBase58()],
+      addresses: { ...presentAgentAddresses(agent), serviceListing: service.serviceListing.toBase58() },
+      instruction: client.instructionPlan(instruction),
+    });
+    return;
+  }
+
+  if (method === "POST" && url.pathname === "/solana/services/deactivate-plan") {
+    const client = requireSolanaClient(solanaClient);
+    const body = await readJsonObject(request);
+    const owner = requiredPubkey(body, "ownerPubkey");
+    const agentId = requiredString(body, "agentId");
+    const serviceType = requiredString(body, "serviceType");
+    const agent = client.deriveAgentAddresses(owner, agentId);
+    const service = client.deriveServiceAddresses(agent.agentRegistry, serviceType);
+    const instruction = client.deactivateServiceIx({
+      owner,
+      agentRegistry: agent.agentRegistry,
+      serviceListing: service.serviceListing,
+    });
+    sendJson(response, 200, {
+      settlementMode,
+      signerPubkeys: [owner.toBase58()],
+      addresses: { ...presentAgentAddresses(agent), serviceListing: service.serviceListing.toBase58() },
+      instruction: client.instructionPlan(instruction),
+    });
+    return;
+  }
+
+  if (method === "POST" && url.pathname === "/solana/direct-payments/plan") {
+    const client = requireSolanaClient(solanaClient);
+    const body = await readJsonObject(request);
+    const owner = requiredPubkey(body, "ownerPubkey");
+    const agentId = requiredString(body, "agentId");
+    const taskId = requiredString(body, "taskId");
+    const mint = requiredPubkey(body, "mint");
+    const recipient = requiredPubkey(body, "recipientPubkey");
+    const agent = client.deriveAgentAddresses(owner, agentId);
+    const directPayment = client.deriveDirectPaymentAddresses(agent.agentRegistry, taskId);
+    const canonicalTokenAccounts = client.deriveDirectPaymentTokenAccounts({ owner, recipient, mint });
+    const payerTokenAccount = optionalPubkey(body, "payerTokenAccount") ?? canonicalTokenAccounts.payerTokenAccount;
+    const recipientTokenAccount = optionalPubkey(body, "recipientTokenAccount") ?? canonicalTokenAccounts.recipientTokenAccount;
+    const amount = parseUsdcAmount(requiredString(body, "amount"));
+    const purpose = requiredString(body, "purpose");
+    const proofUri = requiredString(body, "proofUri");
+    const reconciliationHash = parseHash32(body.reconciliationHash, {
+      taskId,
+      agentId,
+      amount: amount.toString(),
+      recipientPubkey: recipient.toBase58(),
+      purpose,
+      proofUri,
+    });
+    const instruction = client.directPaymentIx({
+      owner,
+      agentRegistry: agent.agentRegistry,
+      policyVault: agent.policyVault,
+      reconciliationRecord: directPayment.reconciliationRecord,
+      payerTokenAccount,
+      recipientTokenAccount,
+      mint,
+      recipient,
+      taskId,
+      amount,
+      purpose,
+      reconciliationHash,
+      proofUri,
+    });
+    sendJson(response, 200, {
+      settlementMode,
+      signerPubkeys: [owner.toBase58()],
+      addresses: {
+        ...presentAgentAddresses(agent),
+        reconciliationRecord: directPayment.reconciliationRecord.toBase58(),
+      },
+      tokenAccounts: {
+        payerTokenAccount: payerTokenAccount.toBase58(),
+        recipientTokenAccount: recipientTokenAccount.toBase58(),
+      },
+      setupInstructions: directPaymentTokenSetupPlans(client, owner, canonicalTokenAccounts, {
+        payerTokenAccount,
+        recipientTokenAccount,
+      }, {
+        payerOwner: owner,
+        recipientOwner: recipient,
+        mint,
+      }),
+      instruction: client.instructionPlan(instruction),
+      reconciliationHashHex: reconciliationHash.toString("hex"),
+      preconditions: [
+        "The policy must include the direct_payment action and enough remaining session budget.",
+        "The payer token account must hold enough SPL token balance for the payment amount.",
+      ],
+    });
+    return;
+  }
+
+  if (method === "POST" && url.pathname === "/solana/bundles/execute") {
+    const client = requireSolanaClient(solanaClient);
+    const body = await readJsonObject(request);
+    const bundle = requiredBundle(body.bundle);
+    const validation = validateTransactionBundlePlan(bundle);
+    if (!validation.ok) {
+      throw new Error(`Invalid transaction bundle: ${validation.errors.join(" ")}`);
+    }
+    const signers = loadConfiguredBackendSigners();
+    const missingSigners = requiredBundleSigners(bundle).filter((signer) => !signers.has(signer));
+    if (missingSigners.length > 0) {
+      throw new Error(
+        `Backend signer configuration is missing ${missingSigners.join(", ")}. Configure ACCURAL_OWNER_KEYPAIR, ACCURAL_VERIFIER_KEYPAIR, or ACCURAL_EXTRA_SIGNER_KEYPAIRS.`,
+      );
+    }
+    const result = await executeTransactionBundle({
+      client,
+      bundle,
+      signers,
+      simulateBeforeSend: optionalBoolean(body, "simulateBeforeSend") ?? parseBooleanEnv(process.env.ACCURAL_SIMULATE_BEFORE_SEND, true),
+    });
+    sendJson(response, 200, {
+      settlementMode,
+      settlesOnChain: true,
+      ...result,
+      verifiedBundleHash: bundlePlanHash(bundle),
+    });
+    return;
+  }
+
+  if (method === "POST" && url.pathname === "/agents") {
+    const localRuntime = requireLocalRuntime(runtime);
+    const body = await readJsonObject(request);
+    const result = await localRuntime.createAgentWallet({
       agentId: requiredString(body, "agentId"),
       ownerPubkey: optionalString(body, "ownerPubkey"),
     });
@@ -274,20 +424,23 @@ async function handleRequest(
   }
 
   if (method === "GET" && parts.length === 3 && parts[0] === "agents" && parts[2] === "balance") {
-    const result = await runtime.getBalance({ agentId: parts[1]! });
+    const localRuntime = requireLocalRuntime(runtime);
+    const result = await localRuntime.getBalance({ agentId: parts[1]! });
     sendJson(response, 200, result);
     return;
   }
 
   if (method === "GET" && parts.length === 3 && parts[0] === "agents" && parts[2] === "reputation") {
-    const result = await runtime.getReputation(parts[1]!);
+    const localRuntime = requireLocalRuntime(runtime);
+    const result = await localRuntime.getReputation(parts[1]!);
     sendJson(response, 200, result);
     return;
   }
 
   if (method === "POST" && url.pathname === "/policies") {
+    const localRuntime = requireLocalRuntime(runtime);
     const body = await readJsonObject(request);
-    const result = await runtime.setSpendPolicy({
+    const result = await localRuntime.setSpendPolicy({
       agentId: requiredString(body, "agentId"),
       maxPerTransaction: requiredString(body, "maxPerTransaction"),
       sessionBudget: requiredString(body, "sessionBudget"),
@@ -300,8 +453,9 @@ async function handleRequest(
   }
 
   if (method === "POST" && url.pathname === "/payment-intents") {
+    const localRuntime = requireLocalRuntime(runtime);
     const body = await readJsonObject(request);
-    const result = await runtime.requestPayment({
+    const result = await localRuntime.requestPayment({
       requesterAgentId: requiredString(body, "requesterAgentId"),
       taskId: requiredString(body, "taskId"),
       amount: requiredString(body, "amount"),
@@ -314,8 +468,9 @@ async function handleRequest(
   }
 
   if (method === "POST" && url.pathname === "/escrows") {
+    const localRuntime = requireLocalRuntime(runtime);
     const body = await readJsonObject(request);
-    const result = await runtime.createTaskEscrow({
+    const result = await localRuntime.createTaskEscrow({
       payerAgentId: requiredString(body, "payerAgentId"),
       taskId: requiredString(body, "taskId"),
       amount: requiredString(body, "amount"),
@@ -330,8 +485,9 @@ async function handleRequest(
   }
 
   if (method === "POST" && parts.length === 3 && parts[0] === "escrows" && parts[2] === "release") {
+    const localRuntime = requireLocalRuntime(runtime);
     const body = await readJsonObject(request);
-    const result = await runtime.releaseEscrow({
+    const result = await localRuntime.releaseEscrow({
       taskId: parts[1]!,
       verifierPubkey: requiredString(body, "verifierPubkey"),
       outcome: requiredString(body, "outcome"),
@@ -342,8 +498,9 @@ async function handleRequest(
   }
 
   if (method === "POST" && url.pathname === "/direct-payments") {
+    const localRuntime = requireLocalRuntime(runtime);
     const body = await readJsonObject(request);
-    const result = await runtime.directPayment({
+    const result = await localRuntime.directPayment({
       payerAgentId: requiredString(body, "payerAgentId"),
       taskId: requiredString(body, "taskId"),
       amount: requiredString(body, "amount"),
@@ -356,15 +513,17 @@ async function handleRequest(
   }
 
   if (method === "GET" && url.pathname === "/reconciliation") {
+    const localRuntime = requireLocalRuntime(runtime);
     const taskId = url.searchParams.get("taskId") ?? undefined;
-    const result = await runtime.reconcilePayment(taskId);
+    const result = await localRuntime.reconcilePayment(taskId);
     sendJson(response, 200, result);
     return;
   }
 
   if (method === "POST" && url.pathname === "/services") {
+    const localRuntime = requireLocalRuntime(runtime);
     const body = await readJsonObject(request);
-    const result = await runtime.registerService({
+    const result = await localRuntime.registerService({
       agentId: requiredString(body, "agentId"),
       serviceType: requiredString(body, "serviceType"),
       description: requiredString(body, "description"),
@@ -375,16 +534,40 @@ async function handleRequest(
   }
 
   if (method === "GET" && url.pathname === "/services") {
+    const localRuntime = requireLocalRuntime(runtime);
     const serviceType = url.searchParams.get("serviceType") ?? undefined;
-    const result = await runtime.listServices({ serviceType });
+    const result = await localRuntime.listServices({ serviceType });
     sendJson(response, 200, result);
     return;
   }
 
   if (method === "POST" && url.pathname === "/agent-runs") {
     const body = await readJsonObject(request);
+    if (settlementMode === "solana-rpc-control-plane") {
+      const client = requireSolanaClient(solanaClient);
+      const result = await runAgentSolanaPlan({
+        solanaClient: client,
+        mode: parseAgentMode(optionalString(body, "mode") ?? "deterministic"),
+        goal: optionalGoal(body),
+        ownerPubkey: optionalString(body, "ownerPubkey"),
+        workerPubkey: optionalString(body, "workerPubkey"),
+        verifierPubkey: optionalString(body, "verifierPubkey"),
+        mint: optionalString(body, "mint"),
+        payerTokenAccount: optionalString(body, "payerTokenAccount"),
+        escrowTokenAccount: optionalString(body, "escrowTokenAccount"),
+        beneficiaryTokenAccount: optionalString(body, "beneficiaryTokenAccount"),
+        humanApproved: optionalBoolean(body, "humanApproved"),
+        expiresAt: parseOptionalUnixTimestamp(body.expiresAt),
+      });
+      sendJson(response, 201, {
+        ...result,
+        settlementBoundary: "Agent decisions produced wallet-ready Solana transaction phases. No SQLite payment state was mutated.",
+      });
+      return;
+    }
+    const localRuntime = requireLocalRuntime(runtime);
     const result = await runAgentDemo({
-      runtime,
+      runtime: localRuntime,
       mode: parseAgentMode(optionalString(body, "mode") ?? "deterministic"),
       goal: optionalGoal(body),
       resetState: optionalBoolean(body, "resetState") ?? true,
@@ -435,6 +618,10 @@ async function handleRequest(
       "POST /solana/payment-intents/request-plan",
       "POST /solana/escrows/fund-plan",
       "POST /solana/escrows/release-plan",
+      "POST /solana/services/register-plan",
+      "POST /solana/services/deactivate-plan",
+      "POST /solana/direct-payments/plan",
+      "POST /solana/bundles/execute",
     ],
   });
 }
@@ -495,18 +682,18 @@ function settlementBoundary(settlementMode: SettlementMode) {
   return "This HTTP service drives the local SQLite runtime. Real settlement is the Anchor program/local-validator path.";
 }
 
-function parseSettlementMode(value: string | undefined): SettlementMode {
-  if (value === "solana" || value === "solana-rpc-control-plane") {
-    return "solana-rpc-control-plane";
-  }
-  return "local-sqlite-control-plane";
-}
-
 function requireSolanaClient(solanaClient: AccuralSolanaClient | undefined) {
   if (!solanaClient) {
-    throw new Error("Solana settlement mode is required for this route. Set ACCURAL_SETTLEMENT_MODE=solana.");
+    throw new Error("Solana settlement mode is required for this route. Set ACCURAL_SETTLEMENT_MODE=solana or omit it for the default Solana mode.");
   }
   return solanaClient;
+}
+
+function requireLocalRuntime(runtime: AccuralRuntime | undefined) {
+  if (!runtime) {
+    throw new Error("This route uses the local SQLite control plane. Set ACCURAL_SETTLEMENT_MODE=local to enable it.");
+  }
+  return runtime;
 }
 
 function presentAgentAddresses(addresses: ReturnType<AccuralSolanaClient["deriveAgentAddresses"]>) {
@@ -595,6 +782,49 @@ function tokenSetupPlans(
   };
 }
 
+function directPaymentTokenSetupPlans(
+  client: AccuralSolanaClient,
+  payer: PublicKey,
+  canonical: ReturnType<AccuralSolanaClient["deriveDirectPaymentTokenAccounts"]>,
+  selected: ReturnType<AccuralSolanaClient["deriveDirectPaymentTokenAccounts"]>,
+  owners: {
+    payerOwner: PublicKey;
+    recipientOwner: PublicKey;
+    mint: PublicKey;
+  },
+) {
+  return {
+    ...(selected.payerTokenAccount.equals(canonical.payerTokenAccount)
+      ? {
+          setupPayerTokenAccount: signedInstructionPlan(
+            client,
+            client.createAssociatedTokenAccountIx({
+              payer,
+              associatedTokenAccount: canonical.payerTokenAccount,
+              owner: owners.payerOwner,
+              mint: owners.mint,
+            }),
+            payer,
+          ),
+        }
+      : {}),
+    ...(selected.recipientTokenAccount.equals(canonical.recipientTokenAccount)
+      ? {
+          setupRecipientTokenAccount: signedInstructionPlan(
+            client,
+            client.createAssociatedTokenAccountIx({
+              payer,
+              associatedTokenAccount: canonical.recipientTokenAccount,
+              owner: owners.recipientOwner,
+              mint: owners.mint,
+            }),
+            payer,
+          ),
+        }
+      : {}),
+  };
+}
+
 function signedInstructionPlan(
   client: AccuralSolanaClient,
   instruction: Parameters<AccuralSolanaClient["instructionPlan"]>[0],
@@ -604,6 +834,45 @@ function signedInstructionPlan(
     signerPubkeys: [signer.toBase58()],
     instruction: client.instructionPlan(instruction),
   };
+}
+
+function requiredBundle(value: unknown): TransactionBundlePlan {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("bundle must be a transaction bundle object.");
+  }
+  const bundle = value as TransactionBundlePlan;
+  if (typeof bundle.bundleId !== "string" || !Array.isArray(bundle.phases)) {
+    throw new Error("bundle must include bundleId and phases.");
+  }
+  return bundle;
+}
+
+function requiredBundleSigners(bundle: TransactionBundlePlan) {
+  return Array.from(new Set(bundle.phases.flatMap((phase) => phase.signerPubkeys)));
+}
+
+function loadConfiguredBackendSigners() {
+  const paths = [
+    process.env.ACCURAL_OWNER_KEYPAIR,
+    process.env.ACCURAL_VERIFIER_KEYPAIR,
+    ...(process.env.ACCURAL_EXTRA_SIGNER_KEYPAIRS?.split(";") ?? []),
+  ]
+    .map((item) => item?.trim())
+    .filter((item): item is string => Boolean(item));
+  const signers = new Map<string, Keypair>();
+  for (const path of paths) {
+    const signer = loadKeypair(path);
+    signers.set(signer.publicKey.toBase58(), signer);
+  }
+  return signers;
+}
+
+function loadKeypair(path: string) {
+  const raw = JSON.parse(readFileSync(path, "utf8")) as unknown;
+  if (!Array.isArray(raw) || raw.some((item) => typeof item !== "number")) {
+    throw new Error(`${path} must contain a Solana CLI keypair JSON array.`);
+  }
+  return Keypair.fromSecretKey(Uint8Array.from(raw));
 }
 
 function sendJson(response: ServerResponse, statusCode: number, payload: unknown) {
@@ -733,9 +1002,9 @@ function parseOptionalUnixTimestamp(value: unknown) {
   return parseUnixTimestamp(value);
 }
 
-function parseHash32(value: unknown) {
+function parseHash32(value: unknown, semanticFallback?: unknown) {
   if (typeof value !== "string" || !value.trim()) {
-    return createHash("sha256").update(String(Date.now())).digest();
+    return semanticReconciliationHash(semanticFallback ?? { generatedAt: new Date(0).toISOString() });
   }
 
   const trimmed = value.trim();

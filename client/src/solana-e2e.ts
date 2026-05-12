@@ -12,8 +12,9 @@ import {
   AccuralSolanaClient,
   semanticReconciliationHash,
 } from "./solana/accural-client.js";
+import { solanaRpcUrl } from "./config.js";
 
-const RPC_URL = process.env.ACCURAL_RPC_URL ?? "http://127.0.0.1:8899";
+const RPC_URL = solanaRpcUrl();
 const USDC_DECIMALS = 6;
 
 async function main() {

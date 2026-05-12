@@ -1,6 +1,7 @@
 import { AccuralSolanaClient } from "./solana/accural-client.js";
+import { solanaRpcUrl } from "./config.js";
 
-const rpcUrl = process.env.ACCURAL_RPC_URL ?? "http://127.0.0.1:8899";
+const rpcUrl = solanaRpcUrl();
 const client = new AccuralSolanaClient({ rpcUrl });
 
 try {
